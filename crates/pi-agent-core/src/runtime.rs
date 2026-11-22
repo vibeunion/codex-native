@@ -9,6 +9,7 @@ pub enum PolicyProfile {
     PiUnrestricted,
 }
 
+#[allow(clippy::derivable_impls)]
 impl Default for PolicyProfile {
     fn default() -> Self {
         #[cfg(all(feature = "pi-native", not(feature = "codex-harness")))]
@@ -47,23 +48,12 @@ impl RuntimeCapabilities {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct EngineSelection {
     pub default_engine: EngineKind,
     pub default_policy: PolicyProfile,
     pub project_override: Option<EngineKind>,
     pub session_override: Option<EngineKind>,
-}
-
-impl Default for EngineSelection {
-    fn default() -> Self {
-        Self {
-            default_engine: EngineKind::default(),
-            default_policy: PolicyProfile::default(),
-            project_override: None,
-            session_override: None,
-        }
-    }
 }
 
 impl EngineSelection {
