@@ -5640,26 +5640,14 @@ fn local_hms(secs: i64) -> Option<(u32, u32, u32)> {
 }
 
 fn local_civil(secs: i64) -> Option<CivilTime> {
-    #[repr(C)]
-    struct LibcTm {
-        tm_sec: i32,
-        tm_min: i32,
-        tm_hour: i32,
-        tm_mday: i32,
-        tm_mon: i32,
-        tm_year: i32,
-        tm_wday: i32,
-        tm_yday: i32,
-        tm_isdst: i32,
-        tm_gmtoff: i64,
-        tm_zone: *const std::ffi::c_char,
-    }
-    extern "C" {
-        fn localtime_r(time: *const i64, result: *mut LibcTm) -> *mut LibcTm;
-    }
+    let timestamp = secs as libc::time_t;
     unsafe {
-        let mut parts = std::mem::zeroed::<LibcTm>();
-        if localtime_r(&secs, &mut parts).is_null() {
+        let mut parts = std::mem::zeroed::<libc::tm>();
+        #[cfg(unix)]
+        let converted = !libc::localtime_r(&timestamp, &mut parts).is_null();
+        #[cfg(windows)]
+        let converted = libc::localtime_s(&mut parts, &timestamp) == 0;
+        if !converted {
             return None;
         }
         Some(CivilTime {
