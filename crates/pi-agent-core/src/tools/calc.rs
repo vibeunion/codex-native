@@ -217,7 +217,7 @@ impl MathEvaluator {
                         "pi" | "π" => output.push(Token::Number(std::f64::consts::PI)),
                         "e" => output.push(Token::Number(std::f64::consts::E)),
                         "tau" | "τ" => output.push(Token::Number(std::f64::consts::TAU)),
-                        "phi" => output.push(Token::Number(std::f64::consts::PHI)),
+                        "phi" => output.push(Token::Number((1.0 + 5.0_f64.sqrt()) / 2.0)),
                         _ => op_stack.push(token), // function call
                     }
                 }
