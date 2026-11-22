@@ -1,3 +1,5 @@
+use pi_agent_core::AppIdentity;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum Language {
     #[default]
@@ -248,4 +250,3 @@ mod tests {
         );
     }
 }
-use pi_agent_core::AppIdentity;

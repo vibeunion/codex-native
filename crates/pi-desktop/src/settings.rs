@@ -123,6 +123,7 @@ pub(super) fn theme_index(theme: ThemePreference) -> usize {
     }
 }
 
+#[allow(clippy::vec_init_then_push)]
 pub(super) fn engine_labels(language: Language) -> Vec<SharedString> {
     let mut labels = Vec::with_capacity(2);
     #[cfg(feature = "codex-harness")]
