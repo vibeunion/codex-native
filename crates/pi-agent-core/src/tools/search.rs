@@ -7,6 +7,10 @@ use tokio::fs::{self, ReadDir};
 
 use super::{Tool, WorkspacePath};
 
+fn normalized_relative_path(path: &std::path::Path) -> String {
+    path.to_string_lossy().replace('\\', "/")
+}
+
 fn search_result_limit(arguments: &Value) -> Result<usize> {
     let Some(input) = arguments.get("max_results") else {
         return Ok(100);
@@ -173,7 +177,12 @@ impl Tool for GrepTool {
                     tokio::task::yield_now().await;
                 }
                 if re.is_match(line) {
-                    matches.push(format!("{}:{}: {}", rel.display(), idx + 1, line.trim()));
+                    matches.push(format!(
+                        "{}:{}: {}",
+                        normalized_relative_path(rel),
+                        idx + 1,
+                        line.trim()
+                    ));
                     if matches.len() >= max_results {
                         break;
                     }
@@ -244,9 +253,9 @@ impl Tool for FindTool {
         let mut entries = SearchWalk::new(workspace_root.clone());
         while let Some((path, _)) = entries.next().await? {
             let rel = path.strip_prefix(&workspace_root).unwrap_or(&path);
-            let rel_str = rel.to_string_lossy();
+            let rel_str = normalized_relative_path(rel);
             if rel_str.to_lowercase().contains(&pattern_str) {
-                matches.push(rel_str.to_string());
+                matches.push(rel_str);
                 if matches.len() >= max_results {
                     break;
                 }
