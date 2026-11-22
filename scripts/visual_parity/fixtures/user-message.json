@@ -1,0 +1,4 @@
+{
+  "id": "visual-user",
+  "content": "Native disclosure fixture.\nSecond line for fixed-height clipping.\nThird line for the background comparison.\nFourth line for the border comparison.\nFifth line for the collapsed state.\nSixth line for the overflow threshold.\nSeventh line for the expanded state.\nEighth line remains readable after expansion."
+}
