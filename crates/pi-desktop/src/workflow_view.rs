@@ -902,6 +902,10 @@ impl PiDesktopApp {
             .into_any_element()
     }
 
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "GPUI layout composition keeps independent timeline, viewport, theme, and context inputs explicit"
+    )]
     fn workflow_ledge(
         &self,
         scope: WorkflowScope<'_>,
@@ -1060,6 +1064,10 @@ impl PiDesktopApp {
             .into_any_element()
     }
 
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "GPUI layout composition keeps independent stage, timing, theme, and context inputs explicit"
+    )]
     fn workflow_stage(
         &self,
         scope: WorkflowScope<'_>,
@@ -1188,6 +1196,10 @@ impl PiDesktopApp {
             .into_any_element()
     }
 
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "GPUI layout composition keeps independent roster, timing, theme, and context inputs explicit"
+    )]
     pub(super) fn workflow_more_row(
         &self,
         scope: WorkflowScope<'_>,
@@ -1687,7 +1699,7 @@ pub(super) fn role_badge(node: &Node, c: &ThemeColors, reduced_motion: bool) -> 
             )
             .into_any_element();
     }
-    // ZCode uses an executor-provided avatar index when available and falls back
+    // Pi Desktop uses an executor-provided avatar index when available and falls back
     // to the role name hash for legacy snapshots.
     let color = c.workflow_avatars[avatar_slot(node.avatar_index, &node.label)];
     let status = node.status;
@@ -1923,6 +1935,33 @@ fn avatar_slot(index: Option<i32>, name: &str) -> usize {
     }
 }
 
+fn node_status_mark(status: Status, reduced_motion: bool, c: &ThemeColors) -> AnyElement {
+    let icon = Icon::new(match status {
+        Status::Running => Glyph::LoaderCircle,
+        Status::Completed => Glyph::CircleCheck,
+        Status::Failed => Glyph::CircleX,
+        Status::Interrupted => Glyph::Square,
+        Status::Waiting => Glyph::Circle,
+    })
+    .size(px(14.))
+    .flex_shrink_0()
+    .text_color(if status == Status::Failed {
+        rgb(c.workflow_error)
+    } else {
+        rgba(c.foreground_subtle)
+    });
+    if status == Status::Running && !reduced_motion {
+        icon.with_animation(
+            "workflow-node-running",
+            Animation::new(std::time::Duration::from_secs(1)).repeat(),
+            |icon, progress| icon.rotate(gpui::radians(progress * std::f32::consts::TAU)),
+        )
+        .into_any_element()
+    } else {
+        icon.into_any_element()
+    }
+}
+
 #[cfg(test)]
 mod visual_identity_tests {
     use pi_agent_core::workflow::{Node, NodeKind, Status};
@@ -2108,7 +2147,7 @@ mod visual_identity_tests {
     }
 
     #[test]
-    fn workflow_stage_geometry_matches_zcode_reference() {
+    fn workflow_stage_geometry_matches_pi_reference() {
         assert_eq!(
             workflow_stage_geometry(),
             super::WorkflowStageGeometry {
@@ -2119,32 +2158,5 @@ mod visual_identity_tests {
                 agent_pill_padding_right: 10.,
             }
         );
-    }
-}
-
-fn node_status_mark(status: Status, reduced_motion: bool, c: &ThemeColors) -> AnyElement {
-    let icon = Icon::new(match status {
-        Status::Running => Glyph::LoaderCircle,
-        Status::Completed => Glyph::CircleCheck,
-        Status::Failed => Glyph::CircleX,
-        Status::Interrupted => Glyph::Square,
-        Status::Waiting => Glyph::Circle,
-    })
-    .size(px(14.))
-    .flex_shrink_0()
-    .text_color(if status == Status::Failed {
-        rgb(c.workflow_error)
-    } else {
-        rgba(c.foreground_subtle)
-    });
-    if status == Status::Running && !reduced_motion {
-        icon.with_animation(
-            "workflow-node-running",
-            Animation::new(std::time::Duration::from_secs(1)).repeat(),
-            |icon, progress| icon.rotate(gpui::radians(progress * std::f32::consts::TAU)),
-        )
-        .into_any_element()
-    } else {
-        icon.into_any_element()
     }
 }

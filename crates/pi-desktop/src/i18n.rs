@@ -42,6 +42,7 @@ pub struct I18nText {
     pub settings_model_title: &'static str,
     pub api_base_label: &'static str,
     pub api_key_label: &'static str,
+    pub api_key_placeholder: &'static str,
     pub model_name_label: &'static str,
     pub language_label: &'static str,
     pub theme_label: &'static str,
@@ -70,7 +71,7 @@ pub struct I18nText {
 }
 
 pub const ZH_CN: I18nText = I18nText {
-    app_title: "Pi Desktop",
+    app_title: "{brand}",
     new_conversation: "新建任务",
     conversation_history: "会话记录",
     automations: "自动化工作流",
@@ -86,13 +87,13 @@ pub const ZH_CN: I18nText = I18nText {
     status_running: "正在执行微秒级调度...",
 
     you: "用户",
-    agent_name: "Pi Agent",
+    agent_name: "{agent}",
     tool_result: "工具执行输出",
     tool_duration: "耗时",
-    welcome_msg: "你好！我是 Pi，基于 Rust 原生构建的高性能自主编程智能体。\n\n· ⚡ 120 FPS GPU 硬件加速渲染，极速流式响应\n· 🛠️ 纯 Rust 自主内核，内置系统级代码重构与工具调用链\n· 🚀 极致轻量：MB 级内存开销，毫秒级冷启动\n\n今天有什么需要我协助分析、构建或重构的代码任务？",
+    welcome_msg: "你好！我是 {agent}，基于 Rust 原生构建的高性能自主编程智能体。\n\n· ⚡ 120 FPS GPU 硬件加速渲染，极速流式响应\n· 🛠️ 纯 Rust 自主内核，内置系统级代码重构与工具调用链\n· 🚀 极致轻量：MB 级内存开销，毫秒级冷启动\n\n今天有什么需要我协助分析、构建或重构的代码任务？",
 
     context_tokens: "上下文",
-    input_placeholder: "向 ZCode 提问，使用 @ 添加上下文，使用 / 选择命令或能力",
+    input_placeholder: "向 {brand} 提问，使用 @ 添加上下文，使用 / 选择命令或能力",
     send_btn: "发送",
 
     settings_title: "系统偏好与配置",
@@ -101,6 +102,7 @@ pub const ZH_CN: I18nText = I18nText {
     settings_model_title: "模型与 API 接口",
     api_base_label: "Base URL",
     api_key_label: "API Key",
+    api_key_placeholder: "输入 API Key",
     model_name_label: "模型",
     language_label: "界面语言 (Language)",
     theme_label: "界面外观",
@@ -128,7 +130,7 @@ pub const ZH_CN: I18nText = I18nText {
 };
 
 pub const EN_US: I18nText = I18nText {
-    app_title: "Pi Desktop",
+    app_title: "{brand}",
     new_conversation: "New Task",
     conversation_history: "Chat History",
     automations: "Automations",
@@ -144,13 +146,13 @@ pub const EN_US: I18nText = I18nText {
     status_running: "Executing tasks...",
 
     you: "User",
-    agent_name: "Pi Agent",
+    agent_name: "{agent}",
     tool_result: "Tool Execution Output",
     tool_duration: "duration",
-    welcome_msg: "Hello! I am Pi, your native high-performance autonomous AI coding agent.\n\n· ⚡ 120 FPS GPU hardware acceleration & ultra-responsive streaming\n· 🛠️ Pure Rust autonomous runtime with native toolchain\n· 🚀 Ultra-lightweight: Minimal resident memory & sub-millisecond cold start\n\nWhat would you like to inspect, build, or refactor today?",
+    welcome_msg: "Hello! I am {agent}, your native high-performance autonomous AI coding agent.\n\n· ⚡ 120 FPS GPU hardware acceleration & ultra-responsive streaming\n· 🛠️ Pure Rust autonomous runtime with native toolchain\n· 🚀 Ultra-lightweight: Minimal resident memory & sub-millisecond cold start\n\nWhat would you like to inspect, build, or refactor today?",
 
     context_tokens: "Context",
-    input_placeholder: "Ask ZCode, use @ for context, / for commands",
+    input_placeholder: "Ask {brand}, use @ for context, / for commands",
     send_btn: "Send",
 
     settings_title: "Preferences & Configuration",
@@ -159,6 +161,7 @@ pub const EN_US: I18nText = I18nText {
     settings_model_title: "Model & API Provider",
     api_base_label: "Base URL",
     api_key_label: "API key",
+    api_key_placeholder: "Enter API key",
     model_name_label: "Model",
     language_label: "Interface Language",
     theme_label: "Appearance",
@@ -193,3 +196,56 @@ impl Language {
         }
     }
 }
+
+impl I18nText {
+    pub fn app_title_for(&self, identity: &AppIdentity) -> String {
+        identity.template(self.app_title)
+    }
+
+    pub fn agent_name_for(&self, identity: &AppIdentity) -> String {
+        identity.template(self.agent_name)
+    }
+
+    pub fn welcome_message_for(&self, identity: &AppIdentity) -> String {
+        identity.template(self.welcome_msg)
+    }
+
+    pub fn input_placeholder_for(&self, identity: &AppIdentity) -> String {
+        identity.template(self.input_placeholder)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Language;
+    use pi_agent_core::AppIdentity;
+
+    #[test]
+    fn provider_key_hint_tracks_language_in_both_directions() {
+        for (language, expected) in [
+            (Language::Chinese, "输入 API Key"),
+            (Language::English, "Enter API key"),
+            (Language::Chinese, "输入 API Key"),
+        ] {
+            assert_eq!(language.text().api_key_placeholder, expected);
+        }
+    }
+
+    #[test]
+    fn branded_prompts_use_the_runtime_identity() {
+        let identity = AppIdentity {
+            brand_name: "Example App".into(),
+            agent_name: "Example Agent".into(),
+            description: "Desktop app".into(),
+        };
+        assert_eq!(
+            Language::English.text().input_placeholder_for(&identity),
+            "Ask Example App, use @ for context, / for commands"
+        );
+        assert_eq!(
+            Language::Chinese.text().agent_name_for(&identity),
+            "Example Agent"
+        );
+    }
+}
+use pi_agent_core::AppIdentity;

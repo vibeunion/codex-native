@@ -4,15 +4,20 @@ version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
-description = "Native AI coding desktop interface powered by Volt"
+description = "Codex Native configurable AI coding desktop interface"
+
+[features]
+default = ["codex-harness", "pi-native"]
+codex-harness = ["pi-agent-core/codex-harness"]
+pi-native = ["pi-agent-core/pi-native"]
 
 [[bin]]
 name = "volt"
 path = "src/main.rs"
 
 [dependencies]
-pi-agent-core = { path = "../pi-agent-core" }
-gpui-kit = "0.7"
+pi-agent-core = { path = "../pi-agent-core", default-features = false }
+gpui-kit = "0.7.3"
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -24,4 +29,4 @@ tracing-subscriber = { workspace = true }
 reqwest = { workspace = true }
 
 [dev-dependencies]
-tempfile = "3.17"
+tempfile = "3.27.0"

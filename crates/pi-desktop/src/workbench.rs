@@ -5,8 +5,12 @@ use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants};
 use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
 use gpui_kit::prelude::FluentBuilder;
 use interactions::*;
+mod composer_toolbar;
+mod draft_prompts;
+mod recovery;
+mod run_notice;
 
-/// Shell geometry from the pinned ZCode sidebar and header contract.
+/// Shell geometry from the pinned Pi Desktop sidebar and header contract.
 const SIDEBAR_WIDTH: Pixels = px(268.);
 const SIDEBAR_HIDE_BREAKPOINT: Pixels = px(820.);
 const WORKBENCH_HEADER_HEIGHT: Pixels = px(48.);
@@ -140,7 +144,7 @@ pub(super) fn automation_field(
         )
 }
 const AUTOMATION_GRID_BREAKPOINT: Pixels = px(1024.);
-/// ZCode uses Tailwind `lg:grid-cols-2` for the automation card list.
+/// Pi Desktop uses Tailwind `lg:grid-cols-2` for the automation card list.
 pub(super) fn automation_grid_columns(width: Pixels) -> u16 {
     if width >= AUTOMATION_GRID_BREAKPOINT {
         2
@@ -156,7 +160,7 @@ pub(super) fn automation_schedule_label(minutes: u32, chinese: bool) -> String {
         format!("Every {minutes} min")
     }
 }
-/// ZCode conversation content column: `calc(100% - 6rem)`, max 4xl at the
+/// Pi Desktop conversation content column: `calc(100% - 6rem)`, max 4xl at the
 /// 864px breakpoint, then `calc(100% - 24rem)`, max 6xl at 1280px.
 pub(crate) fn conversation_composer_width(width: Pixels) -> Pixels {
     if width >= px(1280.) {
@@ -192,9 +196,7 @@ fn transcript_content_width(content_width: Pixels) -> Pixels {
 fn transcript_row_top(index: usize, user: bool, continues_work: bool) -> Pixels {
     if user {
         px(if index == 0 { 56. } else { 76. })
-    } else if index == 0 {
-        px(16.)
-    } else if continues_work {
+    } else if index == 0 || continues_work {
         px(16.)
     } else {
         px(20.)
@@ -635,6 +637,124 @@ fn compact_token_count(tokens: usize) -> String {
     }
 }
 
+fn skills_list_surface(c: &ThemeColors) -> Div {
+    // Keep clipped rows at their natural height so the parent can scroll them.
+    div()
+        .w_full()
+        .min_w_0()
+        .v_flex()
+        .flex_shrink_0()
+        .rounded(px(12.))
+        .overflow_hidden()
+        .bg(rgba(c.card_user_bg))
+}
+
+fn composer_dock(empty: bool) -> Div {
+    div()
+        .w_full()
+        .min_w_0()
+        .flex_shrink_0()
+        .when(empty, |dock| dock.px(px(16.)))
+        .when(!empty, |dock| dock.pb(px(16.)))
+        .v_flex()
+        .items_center()
+}
+
+fn composer_column(width: Pixels, empty: bool) -> Div {
+    div()
+        .w_full()
+        .max_w(width)
+        .min_w_0()
+        .flex_shrink_0()
+        .when(!empty, |column| column.px(px(16.)))
+        .v_flex()
+}
+
+fn draft_bottom_dock() -> Div {
+    div()
+        .w_full()
+        .min_w_0()
+        .flex_shrink_0()
+        .mt(px(12.))
+        .v_flex()
+        .items_center()
+}
+
+fn composer_context_header() -> Div {
+    div()
+        .min_w_0()
+        .p(px(6.))
+        .h_flex()
+        .flex_wrap()
+        .items_center()
+        .gap(px(0.))
+}
+
+fn composer_workspace_content(
+    label: impl Into<SharedString>,
+    font_size: Pixels,
+    colors: &ThemeColors,
+) -> Div {
+    div()
+        .h_flex()
+        .min_w_0()
+        .items_center()
+        .gap(px(4.))
+        .text_size(font_size)
+        .line_height(relative(1.625))
+        .font_normal()
+        .whitespace_nowrap()
+        .text_color(rgb(colors.text_primary))
+        .child(
+            Icon::new(Glyph::Folder)
+                .size(px(16.))
+                .flex_shrink_0()
+                .text_color(rgba(colors.foreground_subtle)),
+        )
+        .child(div().min_w_0().truncate().child(label.into()))
+        .child(
+            Icon::new(Glyph::ChevronDown)
+                .size(px(14.))
+                .flex_shrink_0()
+                .text_color(rgba(colors.foreground_subtle)),
+        )
+}
+
+fn composer_workspace_button(
+    label: impl Into<SharedString>,
+    font_size: Pixels,
+    colors: &ThemeColors,
+) -> Button {
+    let label = label.into();
+    Button::new("composer-workspace")
+        .ghost()
+        .small()
+        .h(px(28.))
+        .min_w_0()
+        .max_w(px(240.))
+        .pl(px(12.))
+        .pr(px(8.))
+        .border_1()
+        .border_color(rgba(0x00000000))
+        .rounded(px(14.))
+        .child(composer_workspace_content(label.clone(), font_size, colors))
+        .accessibility_label(label)
+}
+
+fn composer_input_surface(colors: &ThemeColors) -> Div {
+    div()
+        .w_full()
+        .min_w_0()
+        .v_flex()
+        .gap(px(12.))
+        .p(px(12.))
+        .rounded(px(16.))
+        .overflow_hidden()
+        .bg(rgb(colors.dock_bg))
+        .border_1()
+        .border_color(rgba(colors.dock_border))
+}
+
 impl Render for PiDesktopApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let dark = match self.theme_preference {
@@ -686,8 +806,8 @@ impl Render for PiDesktopApp {
             }
         };
         div()
-            .id("zcode-workbench")
-            .key_context("ZCode")
+            .id("pi-workbench")
+            .key_context("Desktop")
             .track_focus(&self.root_focus)
             .on_action(
                 cx.listener(|this, _: &NewTask, window, cx| this.new_conversation(window, cx)),
@@ -1097,7 +1217,7 @@ impl PiDesktopApp {
             )
             // Spacing to divider: 21pt (42 Retina px), landing divider at Retina y=352
             .child(div().h(SIDEBAR_NAV_TO_TASKS_GAP))
-            // 1px horizontal divider matching ZCode 3.16.2 reference at Retina y=352
+            // 1px horizontal divider matching Pi Desktop 3.16.2 reference at Retina y=352
             .child(div().w_full().px_3().child(div().w_full().h(px(1.)).bg(
                 if Theme::global(cx).is_dark() {
                     rgb(0x3d3d3d)
@@ -1839,25 +1959,30 @@ impl PiDesktopApp {
                 .text_system()
                 .shape_line(greeting.clone(), px(30.), &[run], None)
                 .width;
-            let available_width = (content_width.min(px(672.)) - px(32.)).max(px(0.));
+            let available_width = (draft_greeting_width(content_width) - px(32.)).max(px(0.));
             let greeting_size =
                 resolve_greeting_font_size(available_width / px(1.), natural_width / px(1.));
             let logo_width = (window.viewport_size().width * 0.72).min(px(400.));
             let logo_height = logo_width * 0.8;
             let dark = Theme::global(cx).is_dark();
+            let draft_scroll = window
+                .use_keyed_state("empty-conversation-scroll", cx, |_, _| ScrollHandle::new())
+                .read(cx)
+                .clone();
             return div()
                 .id("empty-conversation")
                 .flex_1()
                 .min_w_0()
                 .min_h_0()
                 .overflow_y_scroll()
+                .track_scroll(&draft_scroll)
                 .children(self.goal_banner(c, cx))
                 .child(
                     div()
                         .v_flex()
                         .min_h_full()
                         .items_center()
-                        // ZCode's draft timeline uses a viewport-based leading spacer,
+                        // Pi Desktop's draft timeline uses a viewport-based leading spacer,
                         // then lets the trailing space absorb the remaining height.
                         .child(
                             div()
@@ -1866,16 +1991,7 @@ impl PiDesktopApp {
                                 .flex_basis(window.viewport_size().height * 0.29),
                         )
                         .child(
-                            div()
-                                .relative()
-                                .w_full()
-                                .max_w(px(672.))
-                                .flex_shrink_0()
-                                .mb(px(if window.viewport_size().width < px(640.) {
-                                    40.
-                                } else {
-                                    49.
-                                }))
+                            draft_greeting_frame(content_width, window.viewport_size().width)
                                 .child(
                                     div()
                                         .absolute()
@@ -1894,27 +2010,22 @@ impl PiDesktopApp {
                                             .h(logo_height),
                                         ),
                                 )
-                                .child(
-                                    div()
-                                        .w_full()
-                                        .px_4()
-                                        .text_center()
-                                        .text_size(px(greeting_size))
-                                        .line_height(px(greeting_size * 1.2))
-                                        .font_medium()
-                                        .text_color(rgb(c.text_primary))
-                                        .child(greeting),
-                                ),
+                                .child(draft_greeting_text(greeting_size, c).child(greeting)),
                         )
-                        .children(self.pending_recovery_banner(content_width, c, cx))
-                        .children(self.draft_onboard_banner(content_width, c, cx))
-                        .child(self.queue_view(content_width, c, cx))
-                        .child(div().w_full().flex_shrink_0().child(self.composer(
-                            content_width,
-                            c,
-                            cx,
-                        )))
-                        .children(self.draft_suggested_prompts(content_width, c, cx))
+                        .child(
+                            draft_bottom_dock()
+                                .children(self.pending_recovery_banner(content_width, c, cx))
+                                .children(self.draft_onboard_banner(content_width, c, cx))
+                                .child(self.queue_view(content_width, c, cx))
+                                .child(self.composer(content_width, c, window, cx))
+                                .children(self.draft_suggested_prompts(
+                                    content_width,
+                                    c,
+                                    &draft_scroll,
+                                    window,
+                                    cx,
+                                )),
+                        )
                         .child(div().w_full().min_h(px(16.)).flex_1()),
                 )
                 .into_any_element();
@@ -2037,99 +2148,13 @@ impl PiDesktopApp {
                         rows
                     }),
             )
-            .when(self.run_error.is_some(), |root| {
-                let tone = error_banner_tone(self.run_stopped);
-                let target_width = conversation_composer_width(content_width);
-                root.child(
-                    div()
-                        .w_full()
-                        .px_4()
-                        .pb_2()
-                        .h_flex()
-                        .justify_center()
-                        .child(
-                            div()
-                                .w_full()
-                                .max_w(target_width)
-                                .h_flex()
-                                .items_center()
-                                .justify_between()
-                                .gap_3()
-                                .px_3()
-                                .py_2()
-                                .rounded(px(12.))
-                                .border_1()
-                                .when(tone == ErrorBannerTone::Stopped, |b| {
-                                    b.border_color(rgba(c.settings_border)).bg(rgb(c.dock_bg))
-                                })
-                                .when(tone == ErrorBannerTone::Failure, |b| {
-                                    b.border_color(rgba(c.destructive_border))
-                                        .bg(rgba(c.destructive_surface))
-                                })
-                                .child(
-                                    div()
-                                        .h_flex()
-                                        .items_center()
-                                        .gap_2()
-                                        .min_w_0()
-                                        .flex_1()
-                                        .child(
-                                            Icon::new(match tone {
-                                                ErrorBannerTone::Stopped => Glyph::Square,
-                                                ErrorBannerTone::Failure => Glyph::CircleAlert,
-                                            })
-                                            .size(px(16.))
-                                            .text_color(match tone {
-                                                ErrorBannerTone::Stopped => {
-                                                    rgba(c.foreground_subtle)
-                                                }
-                                                ErrorBannerTone::Failure => rgb(c.workflow_error),
-                                            }),
-                                        )
-                                        .child(
-                                            div()
-                                                .min_w_0()
-                                                .truncate()
-                                                .font_medium()
-                                                .text_size(self.ui_text(14.))
-                                                .text_color(match tone {
-                                                    ErrorBannerTone::Stopped => {
-                                                        rgba(c.foreground_subtle)
-                                                    }
-                                                    ErrorBannerTone::Failure => {
-                                                        rgb(c.workflow_error)
-                                                    }
-                                                })
-                                                .child(self.run_error.clone().unwrap_or_default()),
-                                        ),
-                                )
-                                .child(
-                                    Button::new("retry-run")
-                                        .outline()
-                                        .small()
-                                        .h(px(28.))
-                                        .rounded(px(8.))
-                                        .disabled(self.is_executing)
-                                        .child(
-                                            div()
-                                                .h_flex()
-                                                .items_center()
-                                                .gap_1()
-                                                .child(Icon::new(Glyph::RefreshCw).size(px(14.)))
-                                                .child(self.tr("重试", "Retry")),
-                                        )
-                                        .on_click(cx.listener(|this, _, _, cx| this.retry_run(cx))),
-                                ),
-                        ),
-                )
-            })
             .children(self.pending_recovery_banner(content_width, c, cx))
             .child(self.queue_view(content_width, c, cx))
             .child(
                 div()
                     .relative()
                     .w_full()
-                    .child(self.composer(content_width, c, cx))
+                    .child(self.composer(content_width, c, window, cx))
                     .when(
                         !self.scroll_pinned && self.scroll.max_offset().y > px(0.),
                         |dock| {
@@ -2285,7 +2310,8 @@ impl PiDesktopApp {
         fade: bool,
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
-        let segments = crate::generative_ui::parse_message_segments(text);
+        let segments =
+            crate::generative_ui::parse_message_segments_with_workspace(text, &self.workspace_dir);
         let font_size = f32::from(self.preferences.ui_font_size_px);
         let is_dark = Theme::global(cx).is_dark();
         let mut elements = Vec::new();
@@ -2312,7 +2338,7 @@ impl PiDesktopApp {
                         div()
                             .my_2()
                             .child(crate::generative_ui::render_ui_node(
-                                &node,
+                                node.as_ref(),
                                 c,
                                 font_size,
                                 is_dark,
@@ -2524,18 +2550,7 @@ impl PiDesktopApp {
             let message_id = message.id.clone();
             let copy_text = message.content.clone();
 
-            let mut bubble_card = div()
-                .min_w_0()
-                .max_w(bubble_width)
-                .px_4()
-                .py_3()
-                .rounded(px(12.))
-                .rounded_tr(px(2.))
-                .border_1()
-                .border_color(rgba(c.card_border))
-                .bg(rgba(c.card_user_bg))
-                .v_flex()
-                .gap_2();
+            let mut bubble_card = user_message_bubble_frame(bubble_width, c);
 
             if !body.trim().is_empty() {
                 let text: SharedString = body.to_string().into();
@@ -2553,19 +2568,30 @@ impl PiDesktopApp {
                         text.clone(),
                         self.ui_text(14.),
                         &[run],
-                        Some((bubble_width - px(34.)).max(px(1.))),
+                        Some(user_message_text_width(bubble_width)),
                         None,
                     )
                     .ok()
                     .map(|lines| {
                         lines
                             .iter()
-                            .map(|line| line.size(self.ui_text(24.)).height)
+                            .map(|line| {
+                                line.size(user_message_line_height(self.ui_text(14.)))
+                                    .height
+                            })
                             .sum::<Pixels>()
                     });
-                let expandable = text_height.is_some_and(user_message_content_is_expandable);
                 let expand_key = user_message_disclosure_key(&self.session.id, &message.id, body);
                 let expanded = self.expanded_tools.contains(&expand_key);
+                let expandable = user_message_disclosure_is_visible(expanded, text_height);
+                let max_height = user_message_height_motion(
+                    expand_key.clone().into(),
+                    expanded,
+                    text_height,
+                    self.preferences.reduced_motion,
+                    window,
+                    cx,
+                );
                 let toggle_label = if expanded {
                     self.tr("收起消息", "Collapse message")
                 } else {
@@ -2577,17 +2603,12 @@ impl PiDesktopApp {
                     .min_w_0()
                     .v_flex()
                     .child(
-                        div()
-                            .min_w_0()
-                            .text_size(self.ui_text(14.))
-                            .line_height(self.ui_text(20.))
-                            .when(expandable && !expanded, |body| {
-                                body.max_h(px(120.)).overflow_hidden()
-                            })
-                            .child(gpui_kit::base::SelectableText::new(
+                        user_message_content_frame(self.ui_text(14.), max_height).child(
+                            gpui_kit::base::SelectableText::new(
                                 format!("user-{}", message.id),
                                 text,
-                            )),
+                            ),
+                        ),
                     )
                     .when(expandable, |body| {
                         body.child(
@@ -2602,7 +2623,7 @@ impl PiDesktopApp {
                                             .bottom_0()
                                             .left_0()
                                             .right_0()
-                                            .h(px(36.))
+                                            .h(user_message_fade_height(text_height, max_height))
                                             .bg(gpui::linear_gradient(
                                                 180.,
                                                 gpui::linear_color_stop(
@@ -2613,32 +2634,31 @@ impl PiDesktopApp {
                                             )),
                                     )
                                 })
-                                .when(expanded, |toggle| toggle.pt_2())
-                                .child(
-                                    Button::new(expand_key.clone())
-                                        .outline()
-                                        .relative()
-                                        .shadow_sm()
-                                        .small()
-                                        .rounded_full()
-                                        .w(px(32.))
-                                        .h(px(24.))
-                                        .bg(rgb(c.root_bg))
-                                        .tooltip(toggle_label)
-                                        .accessibility_label(toggle_label)
-                                        .child(
-                                            Icon::new(if expanded {
-                                                Glyph::ChevronUp
-                                            } else {
-                                                Glyph::ChevronDown
-                                            })
-                                            .size(px(16.)),
-                                        )
-                                        .on_click(cx.listener(move |this, _, _, cx| {
-                                            this.toggle_tool_expansion(&expand_key);
-                                            cx.notify();
-                                        })),
-                                ),
+                                .when(expanded, |toggle| toggle.pt(px(8.)))
+                                .child(UserMessageDisclosure {
+                                    id: expand_key.clone().into(),
+                                    expanded,
+                                    colors: *c,
+                                    reduced_motion: self.preferences.reduced_motion,
+                                    button: user_message_disclosure_button(
+                                        expand_key.clone(),
+                                        expanded,
+                                    )
+                                    .tooltip(toggle_label)
+                                    .accessibility_label(toggle_label)
+                                    .child(
+                                        Icon::new(if expanded {
+                                            Glyph::ChevronUp
+                                        } else {
+                                            Glyph::ChevronDown
+                                        })
+                                        .size(px(16.)),
+                                    )
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.toggle_tool_expansion(&expand_key);
+                                        cx.notify();
+                                    })),
+                                }),
                         )
                     });
 
@@ -2654,38 +2674,25 @@ impl PiDesktopApp {
                 let epilogue_element = div()
                     .id(format!("epilogue-{}", message.id))
                     .v_flex()
-                    .gap_1()
+                    .items_start()
+                    .gap(px(4.))
                     .min_w_0()
                     .w_full()
                     .child(
-                        div()
-                            .id(format!("epilogue-toggle-{}", message.id))
-                            .h_flex()
-                            .items_center()
-                            .gap_1()
-                            .cursor_pointer()
-                            .child(
-                                Icon::new(if epilogue_open {
-                                    Glyph::ChevronDown
-                                } else {
-                                    Glyph::ChevronRight
-                                })
-                                .size(px(12.))
-                                .text_color(rgba(c.foreground_subtlest)),
-                            )
-                            .child(
-                                div()
-                                    .text_size(self.ui_text(12.))
-                                    .text_color(rgba(c.foreground_subtlest))
-                                    .child(epilogue_label),
-                            )
-                            .on_click(cx.listener({
-                                let key = epilogue_key.clone();
-                                move |this, _, _, cx| {
-                                    this.toggle_tool_expansion(&key);
-                                    cx.notify();
-                                }
-                            })),
+                        user_epilogue_toggle(
+                            format!("epilogue-toggle-{}", message.id),
+                            epilogue_label,
+                            epilogue_open,
+                            self.ui_text(10.),
+                            c,
+                        )
+                        .on_click(cx.listener({
+                            let key = epilogue_key.clone();
+                            move |this, _, _, cx| {
+                                this.toggle_tool_expansion(&key);
+                                cx.notify();
+                            }
+                        })),
                     )
                     .when(epilogue_open, |f| {
                         f.child(
@@ -2694,8 +2701,9 @@ impl PiDesktopApp {
                                 .w_full()
                                 .max_h(px(240.))
                                 .overflow_y_scroll()
-                                .text_size(self.ui_text(13.))
-                                .line_height(self.ui_text(18.))
+                                .font_family(cx.theme().mono_font_family.clone())
+                                .text_size(self.ui_text(12.))
+                                .line_height(relative(1.5))
                                 .text_color(rgba(c.foreground_subtle))
                                 .child(gpui_kit::base::SelectableText::new(
                                     format!("epilogue-text-{}", message.id),
@@ -2756,12 +2764,14 @@ impl PiDesktopApp {
                 self.hovered_tool.as_deref() == Some(id.as_str()),
             );
             let (opacity, radians) = disclosure_motion(
-                format!("tool-chevron-{id}").into(),
-                revealed,
-                expanded,
-                self.preferences.reduced_motion,
-                200,
-                [0.0, 0.0, 0.2, 1.0],
+                DisclosureMotionOptions {
+                    id: format!("tool-chevron-{id}").into(),
+                    revealed,
+                    expanded,
+                    reduced_motion: self.preferences.reduced_motion,
+                    duration_ms: 200,
+                    ease: [0.0, 0.0, 0.2, 1.0],
+                },
                 window,
                 cx,
             );
@@ -3000,12 +3010,14 @@ impl PiDesktopApp {
                 self.hovered_reasoning.as_deref() == Some(id.as_str()),
             );
             let (reasoning_opacity, reasoning_radians) = disclosure_motion(
-                format!("reasoning-chevron-{}", message.id).into(),
-                reasoning_revealed,
-                expanded,
-                self.preferences.reduced_motion,
-                150,
-                [0.4, 0.0, 0.2, 1.0],
+                DisclosureMotionOptions {
+                    id: format!("reasoning-chevron-{}", message.id).into(),
+                    revealed: reasoning_revealed,
+                    expanded,
+                    reduced_motion: self.preferences.reduced_motion,
+                    duration_ms: 150,
+                    ease: [0.4, 0.0, 0.2, 1.0],
+                },
                 window,
                 cx,
             );
@@ -3523,6 +3535,7 @@ impl PiDesktopApp {
         &self,
         content_width: Pixels,
         c: &ThemeColors,
+        window: &Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let empty = !self
@@ -3530,7 +3543,7 @@ impl PiDesktopApp {
             .messages
             .iter()
             .any(|message| message.role != pi_agent_core::Role::System);
-        // ZCode: draft composer is max-w-2xl; an existing conversation uses the
+        // Pi Desktop: draft composer is max-w-2xl; an existing conversation uses the
         // same responsive content column as the timeline (896px wide, then 1152px
         // once the 1280px status-panel breakpoint applies).
         let target_width = if empty {
@@ -3539,34 +3552,51 @@ impl PiDesktopApp {
             conversation_composer_width(content_width)
         };
         let compact = content_width < px(680.);
-        let very_compact = content_width < px(540.);
-        let model_max_width = if very_compact {
-            px(116.)
-        } else if compact {
-            px(160.)
-        } else {
-            px(240.)
-        };
         let token_label = if compact {
             compact_token_count(self.tokens_used)
         } else {
             format!("{} tokens", self.tokens_used)
         };
-        div()
-            .w_full()
-            .when(empty, |dock| dock.px_4())
-            .when(!empty, |dock| dock.pb_4())
-            .v_flex()
-            .items_center()
+        let mode_label = self.tr("变更前确认", "Confirm before edit");
+        let model_label = if empty && self.model_identifier.is_empty() {
+            self.tr("管理模型", "Manage Models").to_string()
+        } else {
+            self.current_model()
+        };
+        // Both column modes spend 32px on gutters and 26px on shell padding/border.
+        let surface_width = if empty {
+            target_width.min((content_width - px(32.)).max(px(0.)))
+        } else {
+            target_width - px(32.)
+        };
+        let toolbar_fit = composer_toolbar::fit(
+            (surface_width - px(26.)).max(px(0.)),
+            shaped_text_width(
+                window,
+                mode_label,
+                self.ui_text(14.),
+                gpui::FontWeight::NORMAL,
+            ),
+            shaped_text_width(
+                window,
+                &model_label,
+                self.ui_text(14.),
+                gpui::FontWeight::NORMAL,
+            ),
+            (self.tokens_used > 0).then(|| {
+                shaped_text_width(
+                    window,
+                    &token_label,
+                    self.ui_text(12.),
+                    gpui::FontWeight::NORMAL,
+                )
+            }),
+            self.is_executing,
+        );
+        composer_dock(empty)
+            .children(self.run_notice(target_width, empty, c, cx))
             .child(
-                div()
-                    .w_full()
-                    .max_w(target_width)
-                    // An existing turn column keeps the dock's 16px inset inside
-                    // the shared content width. The draft timeline already insets
-                    // the whole column, so its shell is not padded twice.
-                    .when(!empty, |column| column.px_4())
-                    .v_flex()
+                composer_column(target_width, empty)
                     .rounded(px(16.))
                     .when(empty, |card| {
                         card.bg(if Theme::global(cx).is_dark() {
@@ -3576,55 +3606,26 @@ impl PiDesktopApp {
                         })
                         .shadow_xs()
                         .child(
-                            div().px_3().py(px(6.)).h_flex().items_center().child(
-                                Button::new("composer-workspace")
-                                    .ghost()
-                                    .small()
-                                    .h(px(28.))
-                                    .rounded(px(8.))
-                                    .px_2()
-                                    .child(
-                                        div()
-                                            .h_flex()
-                                            .items_center()
-                                            .gap_1()
-                                            .child(
-                                                Icon::new(Glyph::Folder)
-                                                    .size(px(14.))
-                                                    .text_color(rgba(c.foreground_subtle)),
-                                            )
-                                            .child(
-                                                div()
-                                                    .text_size(px(13.))
-                                                    .text_color(rgba(c.foreground_subtle))
-                                                    .child(self.tr("选择项目", "Select Project")),
-                                            )
-                                            .child(
-                                                Icon::new(Glyph::ChevronDown)
-                                                    .size(px(12.))
-                                                    .text_color(rgba(c.foreground_subtlest)),
-                                            ),
+                            composer_context_header().child(
+                                self.project_menu(composer_workspace_button(
+                                    projects::project_name(&self.workspace_dir),
+                                    self.ui_text(14.), c,
+                                )
+                                    .custom(
+                                        ButtonCustomVariant::new(cx)
+                                            .color(rgba(0x00000000).into())
+                                            .foreground(rgb(c.text_primary).into())
+                                            .hover(rgba(c.workflow_node_hover).into())
+                                            .active(rgba(c.workflow_node_hover).into()),
                                     )
-                                    .tooltip(self.workspace_dir.display().to_string())
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.toggle_review(window, cx)
-                                     })),
+                                    .tooltip(self.workspace_dir.display().to_string()), cx),
                             ),
                         )
                     })
                     .child(
-                        div()
+                        composer_input_surface(c)
                             .id("composer-shell")
                             .track_focus(&self.input_state.read(cx).focus_handle(cx))
-                            .w_full()
-                            .min_w_0()
-                            .v_flex()
-                            .gap_3()
-                            .p_3()
-                            .rounded(px(16.))
-                            .bg(rgb(c.dock_bg))
-                            .border_1()
-                            .border_color(rgba(c.dock_border))
                             .hover(|style| style.border_color(rgba(c.dock_border_active)))
                             .focus(|style| {
                                 style
@@ -3638,25 +3639,17 @@ impl PiDesktopApp {
                                     .min_h(px(28.))
                                     .max_h(px(160.))
                                     .text_size(self.ui_text(14.))
-                                    .line_height(self.ui_text(20.)),
+                                    .line_height(px(20.)),
                             )
                             .child(
-                                div()
-                                    .h_flex()
-                                    .items_center()
-                                    .justify_between()
+                                composer_toolbar::row()
                                     .child(
-                                        div()
-                                            .h_flex()
-                                            .items_center()
-                                            .gap(px(6.))
+                                        composer_toolbar::leading()
+                                            .child(composer_toolbar::leading_content()
                                             .child(
-                                                Button::new("composer-actions")
+                                                composer_toolbar::icon_button("composer-actions", Glyph::Plus)
                                                     .ghost()
-                                                    .w(px(26.))
-                                                    .h(px(26.))
-                                                    .rounded(px(8.))
-                                                    .icon(Glyph::Plus)
+                                                    .tooltip(self.tr("更多操作", "More actions"))
                                                     .accessibility_label(self.tr("更多操作", "More actions"))
                                                     .dropdown_menu_with_anchor(Anchor::BottomLeft, {
                                                         let app = cx.entity().downgrade();
@@ -3696,83 +3689,38 @@ impl PiDesktopApp {
                                                     }),
                                             )
                                             .child(
-                                                Button::new("composer-approval")
+                                                composer_toolbar::button("composer-approval")
                                                     .ghost()
-                                                    .small()
-                                                    .h(px(28.))
-                                                    .rounded(px(8.))
-                                                    .px_2()
-                                                    .child(
-                                                        div()
-                                                            .h_flex()
-                                                            .items_center()
-                                                            .gap_1()
-                                                            .child(
-                                                                Icon::new(Glyph::Hand)
-                                                                    .size(px(14.))
-                                                                    .text_color(rgba(c.foreground_subtle)),
-                                                            )
-                                                            .child(
-                                                                div()
-                                                                    .text_size(px(13.))
-                                                                    .text_color(rgba(c.foreground_subtle))
-                                                                    .child(self.tr("变更前确认", "Confirm before edit")),
-                                                            )
-                                                            .child(
-                                                                Icon::new(Glyph::ChevronDown)
-                                                                    .size(px(12.))
-                                                                    .text_color(rgba(c.foreground_subtlest)),
-                                                            ),
-                                                    )
-                                                    .tooltip(self.tr("变更前确认", "Confirm before edit")),
-                                            ),
+                                                    .when(toolbar_fit.mode_compact, |button| {
+                                                        button.w(px(28.)).p_0()
+                                                    })
+                                                    .child(composer_toolbar::mode_content(
+                                                        mode_label, toolbar_fit.mode_compact,
+                                                        self.ui_text(14.), c,
+                                                    ))
+                                                    .accessibility_label(mode_label)
+                                                    .tooltip(mode_label),
+                                            )),
                                     )
                                     .child(
-                                        div()
-                                            .h_flex()
-                                            .min_w_0()
-                                            .items_center()
-                                            .justify_end()
-                                            .gap(px(6.))
+                                        composer_toolbar::trailing()
                                             .child(
-                                                Button::new("model-picker")
+                                                composer_toolbar::button("model-picker")
                                                     .ghost()
-                                                    .small()
-                                                    .h(px(28.))
-                                                    .rounded(px(8.))
                                                     .pl(px(8.))
                                                     .pr(px(6.))
+                                                    .when(toolbar_fit.model_compact, |button| {
+                                                        button.px(px(6.))
+                                                    })
                                                     .accessibility_label(
                                                         self.tr("选择模型", "Select model"),
                                                     )
-                                                    .child(
-                                                        div()
-                                                            .h_flex()
-                                                            .min_w_0()
-                                                            .gap_1()
-                                                            .items_center()
-                                                            .child(
-                                                                div()
-                                                                    .min_w_0()
-                                                                    .truncate()
-                                                                    .text_size(px(13.))
-                                                                    .text_color(rgba(c.foreground_subtle))
-                                                                    .child(if empty && self.model_identifier.is_empty() {
-                                                                        self.tr("管理模型", "Manage Models").to_string()
-                                                                    } else {
-                                                                        self.current_model()
-                                                                    }),
-                                                            )
-                                                            .child(
-                                                                Icon::new(Glyph::ChevronDown)
-                                                                    .size(px(12.))
-                                                                    .flex_shrink_0()
-                                                                    .text_color(rgba(
-                                                                        c.foreground_subtlest,
-                                                                    )),
-                                                            ),
-                                                    )
-                                                    .max_w(model_max_width)
+                                                    .tooltip(model_label.clone())
+                                                    .child(composer_toolbar::model_content(
+                                                        model_label.clone(), toolbar_fit.model_compact,
+                                                        self.ui_text(14.), c,
+                                                    ))
+                                                    .w(toolbar_fit.model_width)
                                                     .min_w_0()
                                                     .disabled(self.is_executing)
                                                     .dropdown_menu_with_anchor(
@@ -3827,18 +3775,21 @@ impl PiDesktopApp {
                                                 row.child(
                                                     div()
                                                         .flex_shrink_0()
-                                                        .text_size(px(12.))
+                                                        .text_size(self.ui_text(12.))
+                                                        .line_height(relative(1.5))
                                                         .text_color(rgba(c.foreground_subtle))
                                                         .child(token_label),
                                                 )
                                             })
                                             .when(self.is_executing, |row| {
                                                 row.child(
-                                                    icon_button(
+                                                    composer_toolbar::icon_button(
                                                         "enqueue",
-                                                        self.tr("加入队列", "Queue message"),
                                                         Glyph::Plus,
                                                     )
+                                                    .ghost()
+                                                    .accessibility_label(self.tr("加入队列", "Queue message"))
+                                                    .tooltip(self.tr("加入队列", "Queue message"))
                                                     .disabled(
                                                         self.input_state
                                                             .read(cx)
@@ -3854,13 +3805,10 @@ impl PiDesktopApp {
                                                 )
                                             })
                                             .child(if self.is_executing {
-                                                Button::new("stop")
+                                                composer_toolbar::icon_button("stop", Glyph::Square)
                                                     .secondary()
-                                                    .w(px(32.))
-                                                    .h(px(32.))
-                                                    .rounded(px(8.))
-                                                    .icon(Glyph::Square)
                                                     .accessibility_label(self.tr("停止", "Stop"))
+                                                    .tooltip(self.tr("停止", "Stop"))
                                                     .on_click(cx.listener(|this, _, _, cx| {
                                                         this.stop_run(cx)
                                                     }))
@@ -3879,13 +3827,10 @@ impl PiDesktopApp {
                                                         .hover(rgba(0x000000cc).into())
                                                         .active(rgba(0x000000e6).into())
                                                 };
-                                                Button::new("send")
+                                                composer_toolbar::icon_button("send", Glyph::ArrowUp)
                                                     .custom(brand_btn)
-                                                    .w(px(26.))
-                                                    .h(px(26.))
-                                                    .rounded(px(8.))
-                                                    .icon(Glyph::ArrowUp)
                                                     .accessibility_label(self.t().send_btn)
+                                                    .tooltip(self.t().send_btn)
                                                     .disabled(
                                                         self.input_state
                                                             .read(cx)
@@ -3910,68 +3855,54 @@ impl PiDesktopApp {
         &self,
         content_width: Pixels,
         c: &ThemeColors,
+        outer_scroll: &ScrollHandle,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         if !self.show_quick_actions {
             return None;
         }
         let target_width = content_width.min(px(672.));
-        Some(
-            div()
-                .id("draft-suggested-prompts")
-                .w_full()
-                .mt(px(24.))
-                .px_4()
-                .h_flex()
-                .justify_center()
-                .child(
-                    div()
-                        .w_full()
-                        .max_w(target_width)
-                        .h_flex()
-                        .items_center()
-                        .justify_center()
-                        .flex_wrap()
-                        .gap(px(8.))
-                        .children(DRAFT_SUGGESTED_PROMPTS.iter().map(|item| {
-                            let label = self.tr(item.label_zh, item.label_en);
-                            let prompt = self.tr(item.prompt_zh, item.prompt_en).to_string();
-                            Button::new(format!("suggested-prompt-{}", item.id))
-                                .outline()
-                                .h(px(32.))
-                                .rounded(px(16.))
-                                .px_3()
-                                .disabled(self.is_executing)
-                                .tooltip(prompt.clone())
-                                .child(
-                                    div()
-                                        .h_flex()
-                                        .items_center()
-                                        .gap(px(6.))
-                                        .child(
-                                            Icon::new(item.glyph)
-                                                .size(px(16.))
-                                                .text_color(rgba(c.foreground_subtle)),
-                                        )
-                                        .child(
-                                            div()
-                                                .max_w(px(256.))
-                                                .truncate()
-                                                .text_size(self.ui_text(14.))
-                                                .font_normal()
-                                                .text_color(rgba(c.foreground_subtle))
-                                                .child(label),
-                                        ),
-                                )
-                                .on_click(cx.listener(move |this, _, window, cx| {
-                                    this.input_state.update(cx, |input, cx| {
-                                        input.set_value(prompt.clone(), window, cx);
-                                    });
-                                    this.drafts.insert(this.session.id.clone(), prompt.clone());
-                                    this.persist_active_session();
-                                    this.focus_composer(window, cx);
-                                }))
+        let scroll = window
+            .use_keyed_state("draft-prompts-scroll", cx, |_, _| ScrollHandle::new())
+            .read(cx)
+            .clone();
+        let actions = DRAFT_SUGGESTED_PROMPTS
+            .iter()
+            .enumerate()
+            .map(|(ordinal, item)| {
+                let label = self.tr(item.label_zh, item.label_en);
+                let prompt = self.tr(item.prompt_zh, item.prompt_en).to_string();
+                let id: SharedString = format!("suggested-prompt-{}", item.id).into();
+                draft_prompts::PromptAction {
+                    id: id.clone(),
+                    button: Button::new(id)
+                        .tooltip(prompt.clone())
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.input_state.update(cx, |input, cx| {
+                                input.set_value(prompt.clone(), window, cx);
+                            });
+                            this.drafts.insert(this.session.id.clone(), prompt.clone());
+                            this.persist_active_session();
+                            this.focus_composer(window, cx);
                         })),
+                    label,
+                    glyph: item.glyph,
+                    font_size: self.ui_text(14.),
+                    colors: *c,
+                    disabled: self.is_executing,
+                    reduced_motion: self.preferences.reduced_motion,
+                    ordinal,
+                    scroll: scroll.clone(),
+                    outer_scroll: outer_scroll.clone(),
+                }
+            });
+        Some(
+            draft_prompts::wrapper()
+                .child(
+                    draft_prompts::viewport(target_width)
+                        .track_scroll(&scroll)
+                        .child(draft_prompts::strip().children(actions)),
                 )
                 .into_any_element(),
         )
@@ -4041,133 +3972,7 @@ impl PiDesktopApp {
         c: &ThemeColors,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        if !self.show_onboard_banner {
-            return None;
-        }
-        let target_width = content_width.min(px(672.));
-        Some(
-            div()
-                .id("draft-onboard-notice")
-                .w_full()
-                .h_flex()
-                .justify_center()
-                .child(
-                    div()
-                        .w_full()
-                        .max_w(target_width)
-                        .mb(px(24.))
-                        .px_4()
-                        .py_2()
-                        .rounded(px(12.))
-                        .border_1()
-                        .border_color(if Theme::global(cx).is_dark() {
-                            rgb(0x393939)
-                        } else {
-                            rgba(c.card_border)
-                        })
-                        .bg(if Theme::global(cx).is_dark() {
-                            rgb(0x222222)
-                        } else {
-                            rgb(c.card_bg)
-                        })
-                        .h_flex()
-                        .items_center()
-                        .justify_between()
-                        .child(
-                            div()
-                                .h_flex()
-                                .items_center()
-                                .gap_2()
-                                .child(
-                                    Icon::new(Glyph::Info)
-                                        .size(px(14.))
-                                        .text_color(rgba(c.foreground_subtle)),
-                                )
-                                .child(
-                                    div()
-                                        .text_size(px(13.))
-                                        .text_color(rgba(c.foreground_subtle))
-                                        .child(self.tr(
-                                            "当前没有可用模型。请开通编程套餐或配置自定义模型。",
-                                            "No model available. Please subscribe or configure custom models.",
-                                        )),
-                                ),
-                        )
-                        .child(
-                            div()
-                                .h_flex()
-                                .items_center()
-                                .gap_2()
-                                .child(
-                                    Button::new("onboard-upgrade")
-                                        .ghost()
-                                        .small()
-                                        .h(px(22.))
-                                        .rounded(px(11.))
-                                        .px(px(10.))
-                                        .bg(rgb(0x494a58))
-                                        .child(
-                                            div()
-                                                .h_flex()
-                                                .items_center()
-                                                .gap_1()
-                                                .child(Icon::new(Glyph::Rocket).size(px(12.)).text_color(rgb(0xffffff)))
-                                                .child(
-                                                    div()
-                                                        .text_size(px(12.))
-                                                        .font_medium()
-                                                        .text_color(rgb(0xffffff))
-                                                        .child(self.tr("升级", "Upgrade")),
-                                                ),
-                                        ),
-                                )
-                                .child(
-                                    Button::new("onboard-settings")
-                                        .ghost()
-                                        .small()
-                                        .h(px(24.))
-                                        .rounded(px(6.))
-                                        .border_1()
-                                        .border_color(if Theme::global(cx).is_dark() {
-                                            rgb(0x393939)
-                                        } else {
-                                            rgba(c.card_border)
-                                        })
-                                        .px_2()
-                                        .child(
-                                            div()
-                                                .h_flex()
-                                                .items_center()
-                                                .gap_1()
-                                                .child(Icon::new(Glyph::Settings).size(px(12.)))
-                                                .child(
-                                                    div()
-                                                        .text_size(px(12.))
-                                                        .child(self.tr("配置", "Configure")),
-                                                ),
-                                        )
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            this.show_settings = true;
-                                            cx.notify();
-                                        })),
-                                )
-                                .child(
-                                    Button::new("onboard-dismiss")
-                                        .ghost()
-                                        .small()
-                                        .h(px(24.))
-                                        .w(px(24.))
-                                        .p_0()
-                                        .icon(Glyph::X)
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            this.show_onboard_banner = false;
-                                            cx.notify();
-                                        })),
-                                ),
-                        ),
-                )
-                .into_any_element(),
-        )
+        self.model_setup_notice(content_width, c, cx)
     }
 
     pub(crate) fn pending_recovery_banner(
@@ -4178,101 +3983,58 @@ impl PiDesktopApp {
     ) -> Option<AnyElement> {
         let state = self.task_states.get(&self.session.id)?;
         let pending_text = state.pending_recovery.clone()?;
-        let target_width = conversation_composer_width(content_width);
+        let empty = !self
+            .session
+            .messages
+            .iter()
+            .any(|message| message.role != pi_agent_core::Role::System);
         let retry_text = pending_text.clone();
         Some(
-            div()
+            recovery::wrapper(empty)
                 .id("pending-command-recovery-banner")
-                .w_full()
-                .h_flex()
-                .justify_center()
+                .role(Role::Status)
                 .child(
-                    div()
-                        .w_full()
-                        .max_w(target_width)
-                        .mb(px(12.))
-                        .h_flex()
-                        .items_center()
-                        .justify_between()
-                        .gap_2()
-                        .p_3()
-                        .rounded(px(12.))
-                        .border_1()
-                        .border_color(rgba(c.dock_border))
-                        .bg(rgb(c.card_bg))
-                        .shadow_xs()
+                    recovery::column(content_width, empty).child(
+                        recovery::surface(self.ui_text(14.), c)
                         .child(
-                            div()
-                                .h_flex()
-                                .items_center()
-                                .gap_2()
-                                .min_w_0()
-                                .flex_1()
-                                .child(
-                                    Icon::new(Glyph::CircleAlert)
-                                        .size(px(16.))
-                                        .text_color(rgba(c.foreground_subtle)),
-                                )
-                                .child(
-                                    div()
-                                        .min_w_0()
-                                        .truncate()
-                                        .text_size(self.ui_text(14.))
-                                        .text_color(rgb(c.text_primary))
-                                        .child(self.tr(
-                                            "CLI 重启前已提交的输入没有进入对话",
-                                            "A command submitted before the CLI restarted did not enter the conversation.",
-                                        )),
-                                ),
+                            recovery::message(self.tr(
+                                "CLI 重启前已提交的输入没有进入对话",
+                                "A command submitted before the CLI restarted did not enter the conversation.",
+                            )),
                         )
                         .child(
-                            div()
-                                .h_flex()
-                                .items_center()
-                                .gap_2()
-                                .flex_shrink_0()
-                                .child(
-                                    Button::new("resend-pending-command")
-                                        .outline()
-                                        .small()
-                                        .h(px(28.))
-                                        .rounded(px(8.))
-                                        .child(
-                                            div()
-                                                .h_flex()
-                                                .items_center()
-                                                .gap_1()
-                                                .child(Icon::new(Glyph::RefreshCw).size(px(14.)))
-                                                .child(self.tr("重新发送", "Resend")),
-                                        )
-                                        .on_click(cx.listener(move |this, _, window, cx| {
-                                            if let Some(state) = this.task_states.get_mut(&this.session.id) {
-                                                state.pending_recovery = None;
-                                            }
-                                            this.input_state.update(cx, |input, cx| {
-                                                input.set_value(retry_text.clone(), window, cx);
-                                            });
-                                            this.drafts.insert(this.session.id.clone(), retry_text.clone());
-                                            this.persist_active_session();
-                                            this.focus_composer(window, cx);
-                                        })),
-                                )
-                                .child(
-                                    Button::new("dismiss-pending-command")
-                                        .ghost()
-                                        .small()
-                                        .h(px(28.))
-                                        .rounded(px(8.))
-                                        .child(self.tr("忽略", "Dismiss"))
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            if let Some(state) = this.task_states.get_mut(&this.session.id) {
-                                                state.pending_recovery = None;
-                                            }
-                                            this.persist_active_session();
-                                            cx.notify();
-                                        })),
-                                ),
+                            recovery::resend_button(
+                                self.tr("重新发送", "Resend"),
+                                self.ui_text(14.),
+                            )
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                if let Some(state) = this.task_states.get_mut(&this.session.id) {
+                                    state.pending_recovery = None;
+                                }
+                                this.input_state.update(cx, |input, cx| {
+                                    input.set_value(retry_text.clone(), window, cx);
+                                });
+                                this.drafts.insert(this.session.id.clone(), retry_text.clone());
+                                this.persist_active_session();
+                                this.focus_composer(window, cx);
+                            })),
+                        )
+                        .child(
+                            recovery::dismiss_button(
+                                self.tr("忽略", "Dismiss"),
+                                self.ui_text(14.),
+                                c,
+                                cx,
+                            )
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                if let Some(state) = this.task_states.get_mut(&this.session.id) {
+                                    state.pending_recovery = None;
+                                }
+                                this.persist_active_session();
+                                cx.notify();
+                            })),
                         ),
+                    ),
                 )
                 .into_any_element(),
         )
@@ -4302,6 +4064,18 @@ impl PiDesktopApp {
         let additions = changes.total_additions();
         let deletions = changes.total_deletions();
         let mid_owned = key.clone();
+        let (_, chevron_radians) = disclosure_motion(
+            DisclosureMotionOptions {
+                id: format!("{key}:chevron").into(),
+                revealed: true,
+                expanded: open,
+                reduced_motion: self.preferences.reduced_motion,
+                duration_ms: 150,
+                ease: [0.4, 0., 0.2, 1.],
+            },
+            window,
+            cx,
+        );
 
         let count_label = if count == 1 {
             self.tr("1 个文件已修改", "1 file changed").to_string()
@@ -4364,18 +4138,18 @@ impl PiDesktopApp {
                                 }
                             }))
                             .child(
-                                Icon::new(if open {
-                                    Glyph::ChevronDown
-                                } else {
-                                    Glyph::ChevronRight
-                                })
-                                .size(px(14.))
-                                .text_color(rgba(c.foreground_subtle)),
+                                Icon::new(Glyph::ChevronRight)
+                                    .size(px(14.))
+                                    .flex_shrink_0()
+                                    .text_color(rgba(c.foreground_subtlest))
+                                    .rotate(gpui::radians(chevron_radians)),
                             )
                             .child(
                                 div()
                                     .font_medium()
+                                    .min_w_0()
                                     .text_size(self.ui_text(14.))
+                                    .line_height(relative(1.5))
                                     .text_color(rgb(c.text_primary))
                                     .truncate()
                                     .child(count_label),
@@ -4384,18 +4158,13 @@ impl PiDesktopApp {
                                 additions.zip(deletions),
                                 |trigger, (additions, deletions)| {
                                     trigger.child(
-                                        div()
-                                            .h_flex()
-                                            .items_center()
-                                            .gap_1()
-                                            .flex_shrink_0()
-                                            .font_family(cx.theme().mono_font_family.clone())
-                                            .text_size(self.ui_text(14.))
+                                        crate::file_summary::layout::counts(self.ui_text(14.))
                                             .child(
                                                 div()
                                                     .text_color(rgb(c.accent_green))
                                                     .child(format!("+{additions}")),
                                             )
+                                            .child(" ")
                                             .child(
                                                 div()
                                                     .text_color(rgb(c.workflow_error))
@@ -4405,27 +4174,15 @@ impl PiDesktopApp {
                                 },
                             ),
                     )
-                    .child(
-                        div().h_flex().items_center().gap_2().child(
-                            Button::new(ElementId::Name(format!("rewind-{}", mid_owned).into()))
-                                .ghost()
-                                .small()
-                                .h(px(28.))
-                                .rounded(px(8.))
-                                .disabled(true)
-                                .accessibility_label(
-                                    self.tr("撤销（暂不可用）", "Rewind (unavailable)"),
-                                )
-                                .child(
-                                    div()
-                                        .h_flex()
-                                        .items_center()
-                                        .gap_1()
-                                        .child(Icon::new(Glyph::Undo2).size(px(14.)))
-                                        .child(self.tr("撤销", "Rewind")),
-                                ),
+                    .child(div().h_flex().items_center().gap_2().child(
+                        crate::file_summary::buttons::unavailable_rewind_button(
+                            ElementId::Name(format!("rewind-{}", mid_owned).into()),
+                            self.tr("撤销", "Rewind"),
+                            self.tr("撤销（暂不可用）", "Rewind (unavailable)"),
+                            self.ui_text(14.),
+                            c,
                         ),
-                    ),
+                    )),
             )
             .when(open, |panel| {
                 let items = changes.items.clone();
@@ -4448,54 +4205,52 @@ impl PiDesktopApp {
                                 .unwrap_or("")
                                 .to_string();
 
-                            div()
-                                .h(px(36.))
-                                .px_3()
-                                .h_flex()
-                                .items_center()
-                                .justify_between()
-                                .gap_2()
-                                .min_w_0()
-                                .hover(|s| s.bg(rgba(c.selected)))
-                                .child(
-                                    div()
-                                        .h_flex()
-                                        .items_center()
-                                        .gap_2()
-                                        .flex_1()
-                                        .min_w_0()
-                                        .child(
-                                            Icon::new(Glyph::FileText)
-                                                .size(px(14.))
-                                                .text_color(rgba(c.foreground_subtle)),
-                                        )
-                                        .child(
-                                            div()
-                                                .font_medium()
-                                                .text_size(self.ui_text(14.))
-                                                .text_color(rgb(c.text_primary))
-                                                .min_w_0()
-                                                .truncate()
-                                                .child(file_name),
-                                        )
-                                        .when(!parent_dir.is_empty(), |d| {
-                                            d.child(
-                                                div()
-                                                    .min_w_0()
-                                                    .truncate()
-                                                    .text_size(self.ui_text(14.))
-                                                    .text_color(rgba(c.foreground_subtle))
-                                                    .child(parent_dir),
+                            crate::file_summary::layout::file_surface(c).child(
+                                crate::file_summary::layout::file_row(self.ui_text(14.), c)
+                                    .child(
+                                        div()
+                                            .h_flex()
+                                            .items_center()
+                                            .gap_2()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .child(
+                                                crate::file_summary::layout::file_label()
+                                                    .child(
+                                                        Icon::new(Glyph::FileText)
+                                                            .size(px(14.))
+                                                            .flex_shrink_0()
+                                                            .text_color(rgba(
+                                                                c.foreground_subtlest,
+                                                            )),
+                                                    )
+                                                    .child(
+                                                        div()
+                                                            .font_medium()
+                                                            .text_size(self.ui_text(14.))
+                                                            .text_color(rgb(c.text_primary))
+                                                            .min_w_0()
+                                                            .truncate()
+                                                            .child(file_name),
+                                                    )
+                                                    .when(!parent_dir.is_empty(), |d| {
+                                                        d.child(
+                                                            div()
+                                                                .min_w_0()
+                                                                .truncate()
+                                                                .text_size(self.ui_text(14.))
+                                                                .text_color(rgba(
+                                                                    c.foreground_subtlest,
+                                                                ))
+                                                                .child(parent_dir),
+                                                        )
+                                                    }),
                                             )
-                                        })
-                                        .child(
-                                            div()
-                                                .h_flex()
-                                                .items_center()
-                                                .gap_1()
-                                                .flex_shrink_0()
-                                                .font_family(cx.theme().mono_font_family.clone())
-                                                .text_size(self.ui_text(14.))
+                                            .child(
+                                                crate::file_summary::layout::counts(
+                                                    self.ui_text(14.),
+                                                )
+                                                .gap(px(8.))
                                                 .when_some(
                                                     item.additions.filter(|count| *count > 0),
                                                     |d, count| {
@@ -4516,31 +4271,37 @@ impl PiDesktopApp {
                                                         )
                                                     },
                                                 ),
+                                            ),
+                                    )
+                                    .child(
+                                        crate::file_summary::buttons::review_button(
+                                            ElementId::Name(
+                                                format!("review-file-{}-{}", mid_owned, idx).into(),
+                                            ),
+                                            self.tr("审查", "Review"),
+                                            self.ui_text(14.),
+                                            c,
+                                        )
+                                        .accessibility_label(format!(
+                                            "{} {}",
+                                            self.tr("审查", "Review"),
+                                            open_path
+                                        ))
+                                        .tooltip(open_path.clone())
+                                        .on_click(
+                                            cx.listener({
+                                                let target_path = open_path;
+                                                move |this, _, window, cx| {
+                                                    this.open_review_file(
+                                                        target_path.clone(),
+                                                        window,
+                                                        cx,
+                                                    );
+                                                }
+                                            }),
                                         ),
-                                )
-                                .child(
-                                    Button::new(ElementId::Name(
-                                        format!("review-file-{}-{}", mid_owned, idx).into(),
-                                    ))
-                                    .outline()
-                                    .small()
-                                    .h(px(28.))
-                                    .rounded(px(8.))
-                                    .flex_shrink_0()
-                                    .accessibility_label(format!(
-                                        "{} {}",
-                                        self.tr("审查", "Review"),
-                                        open_path
-                                    ))
-                                    .tooltip(open_path.clone())
-                                    .child(self.tr("审查", "Review"))
-                                    .on_click(cx.listener({
-                                        let target_path = open_path;
-                                        move |this, _, window, cx| {
-                                            this.open_review_file(target_path.clone(), window, cx);
-                                        }
-                                    })),
-                                )
+                                    ),
+                            )
                         })),
                 )
             })
@@ -4636,14 +4397,8 @@ impl PiDesktopApp {
                     ),
             )
             .child(
-                div()
-                    .w_full()
-                    .min_w_0()
-                    .v_flex()
-                    .rounded(px(12.))
-                    .overflow_hidden()
-                    .bg(rgba(c.card_user_bg))
-                    .children(skills.into_iter().enumerate().map(|(index, skill)| {
+                skills_list_surface(c).children(skills.into_iter().enumerate().map(
+                    |(index, skill)| {
                         let name = if self.language == Language::Chinese {
                             skill.name.clone()
                         } else {
@@ -4740,7 +4495,8 @@ impl PiDesktopApp {
                                     },
                                 )),
                             )
-                    })),
+                    },
+                )),
             )
             .into_any_element()
     }
@@ -5076,7 +4832,7 @@ impl PiDesktopApp {
                                     menu.item(PopupMenuItem::new(toggle_label).on_click(move |_, _, cx| {
                                         let _=toggle_app.update(cx, |this, cx| {
                                             if let Some(job)=this.automations.iter_mut().find(|job|job.id==toggle_id) {
-                                                job.enabled=!job.enabled;
+                                                job.enabled = !job.enabled;
                                                 job.next_run=desktop_state::now()+u64::from(job.minutes)*60;
                                             }
                                             this.persist_active_session();cx.notify();
@@ -5110,6 +4866,185 @@ const USER_MESSAGE_BREAKPOINT: Pixels = px(624.);
 const USER_MESSAGE_MAX_WIDTH: Pixels = px(576.);
 const USER_MESSAGE_COLLAPSED_MAX_HEIGHT: f32 = 120.;
 const USER_MESSAGE_OVERFLOW_TOLERANCE: f32 = 1.;
+const USER_MESSAGE_HEIGHT_TRANSITION_MS: u64 = 300;
+const USER_MESSAGE_HEIGHT_EASE: [f32; 4] = [0., 0., 0.2, 1.];
+const USER_MESSAGE_PADDING_X: Pixels = px(16.);
+const USER_MESSAGE_PADDING_Y: Pixels = px(12.);
+const USER_MESSAGE_BORDER: Pixels = px(1.);
+
+fn user_message_bubble_frame(max_width: Pixels, colors: &ThemeColors) -> Div {
+    div()
+        .min_w_0()
+        .max_w(max_width)
+        .px(USER_MESSAGE_PADDING_X)
+        .py(USER_MESSAGE_PADDING_Y)
+        .rounded(px(12.))
+        .rounded_tr(px(2.))
+        .border(USER_MESSAGE_BORDER)
+        .border_color(rgba(colors.card_border))
+        .bg(rgba(colors.card_user_bg))
+        .v_flex()
+        .gap(px(8.))
+}
+
+fn user_message_text_width(bubble_width: Pixels) -> Pixels {
+    (bubble_width - (USER_MESSAGE_PADDING_X + USER_MESSAGE_BORDER) * 2.).max(px(1.))
+}
+
+fn user_message_disclosure_button(id: impl Into<gpui::ElementId>, expanded: bool) -> Button {
+    // Component Button exposes base interactivity but not the stateful ARIA builders.
+    struct DisclosureState<'a>(&'a mut gpui::Interactivity);
+    impl InteractiveElement for DisclosureState<'_> {
+        fn interactivity(&mut self) -> &mut gpui::Interactivity {
+            self.0
+        }
+    }
+    impl StatefulInteractiveElement for DisclosureState<'_> {}
+
+    let mut button = Button::new(id)
+        .relative()
+        // GPUI takes Gaussian sigma; the reference CSS blur radii are twice it.
+        .shadow(vec![
+            BoxShadow::new(px(0.), px(1.), gpui::hsla(0., 0., 0., 0.1)).blur_radius(px(1.5)),
+            BoxShadow::new(px(0.), px(1.), gpui::hsla(0., 0., 0., 0.1))
+                .blur_radius(px(1.))
+                .spread_radius(px(-1.)),
+        ])
+        .small()
+        .rounded_full()
+        .w(px(34.))
+        .h(px(24.))
+        .px(px(8.))
+        .border_1();
+    DisclosureState(button.interactivity()).aria_expanded(expanded);
+    button
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct UserMessageDisclosurePaint {
+    background: Hsla,
+    border: Hsla,
+}
+
+fn user_message_disclosure_paint(
+    colors: &ThemeColors,
+    hovered: bool,
+    expanded: bool,
+) -> UserMessageDisclosurePaint {
+    UserMessageDisclosurePaint {
+        background: if hovered || expanded {
+            rgb(colors.dock_bg).alpha(0.5).into()
+        } else {
+            rgb(colors.root_bg).into()
+        },
+        border: rgba(if hovered {
+            colors.dock_border_active
+        } else {
+            colors.card_border
+        })
+        .into(),
+    }
+}
+
+fn user_message_disclosure_color_duration(reduced_motion: bool) -> std::time::Duration {
+    std::time::Duration::from_millis(if reduced_motion { 0 } else { 150 })
+}
+
+fn user_message_disclosure_action_key(id: SharedString, phase: &'static str) -> ElementId {
+    (ElementId::from(id), phase).into()
+}
+
+#[derive(IntoElement)]
+struct UserMessageDisclosure {
+    id: SharedString,
+    button: Button,
+    expanded: bool,
+    colors: ThemeColors,
+    reduced_motion: bool,
+}
+
+impl RenderOnce for UserMessageDisclosure {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        use gpui_kit::base::{transition, Transition};
+
+        let key = |phase| user_message_disclosure_action_key(self.id.clone(), phase);
+        let pointer = window.use_keyed_state(key("pointer"), cx, |_, _| false);
+        let target = user_message_disclosure_paint(&self.colors, *pointer.read(cx), self.expanded);
+        let policy = Transition::new(user_message_disclosure_color_duration(self.reduced_motion))
+            .ease(gpui_kit::base::animation::cubic_bezier(0.4, 0., 0.2, 1.));
+        let background = transition(
+            key("background"),
+            target.background,
+            policy.clone(),
+            window,
+            cx,
+        );
+        let border = transition(key("border"), target.border, policy, window, cx);
+        let button = self
+            .button
+            .custom(
+                ButtonCustomVariant::new(cx)
+                    .color(border)
+                    .foreground(rgb(self.colors.text_primary).into())
+                    .hover(background)
+                    .active(background),
+            )
+            .bg(background)
+            .border_color(border);
+        // Observe outside the Button so its tooltip and native activation stay intact.
+        div()
+            .id(key("pointer-observer"))
+            .h_flex()
+            .flex_shrink_0()
+            .hover_listener_mode(HoverListenerMode::InputModalityIndependent)
+            .on_hover(move |hovered, window, cx| {
+                if pointer.read(cx) != hovered {
+                    pointer.update(cx, |state, _| *state = *hovered);
+                    window.refresh();
+                }
+            })
+            .child(button)
+    }
+}
+
+fn user_epilogue_toggle(
+    id: impl Into<gpui::ElementId>,
+    label: &'static str,
+    expanded: bool,
+    font_size: Pixels,
+    colors: &ThemeColors,
+) -> gpui_kit::base::Button {
+    gpui_kit::base::Button::new(id)
+        .accessibility_label(label)
+        .aria_expanded(expanded)
+        .h_flex()
+        .items_center()
+        .justify_start()
+        .gap(px(4.))
+        .p_0()
+        .rounded(px(6.))
+        .text_size(font_size)
+        .font_normal()
+        .line_height(relative(1.5))
+        .text_color(rgba(colors.foreground_subtlest))
+        .hover(|style| style.text_color(rgb(colors.text_primary)))
+        .focus_visible(|style| {
+            style
+                .text_color(rgb(colors.text_primary))
+                .bg(rgba(colors.hover))
+        })
+        .cursor_pointer()
+        .child(
+            Icon::new(if expanded {
+                Glyph::ChevronDown
+            } else {
+                Glyph::ChevronRight
+            })
+            .size(px(12.))
+            .flex_shrink_0(),
+        )
+        .child(label)
+}
 
 fn user_message_bubble_width(content_width: Pixels) -> Pixels {
     let available = transcript_content_width(content_width);
@@ -5124,16 +5059,97 @@ fn user_message_content_is_expandable(measured_height: Pixels) -> bool {
     measured_height / px(1.) > USER_MESSAGE_COLLAPSED_MAX_HEIGHT + USER_MESSAGE_OVERFLOW_TOLERANCE
 }
 
+fn user_message_disclosure_is_visible(expanded: bool, measured_height: Option<Pixels>) -> bool {
+    expanded || measured_height.is_some_and(user_message_content_is_expandable)
+}
+
+fn user_message_height_target(expanded: bool, measured_height: Option<Pixels>) -> Option<Pixels> {
+    measured_height.map(|height| {
+        if expanded {
+            height.max(px(USER_MESSAGE_COLLAPSED_MAX_HEIGHT))
+        } else {
+            px(USER_MESSAGE_COLLAPSED_MAX_HEIGHT)
+        }
+    })
+}
+
+fn user_message_height_duration(
+    reduced_motion: bool,
+    measurement_available: bool,
+    previously_measured: &mut bool,
+) -> std::time::Duration {
+    let animate = !reduced_motion && measurement_available && *previously_measured;
+    *previously_measured = measurement_available;
+    std::time::Duration::from_millis(if animate {
+        USER_MESSAGE_HEIGHT_TRANSITION_MS
+    } else {
+        0
+    })
+}
+
+fn user_message_height_motion(
+    id: SharedString,
+    expanded: bool,
+    measured_height: Option<Pixels>,
+    reduced_motion: bool,
+    window: &mut Window,
+    cx: &mut App,
+) -> Option<Pixels> {
+    use gpui_kit::base::{transition, Transition};
+    let target = user_message_height_target(expanded, measured_height);
+    let measurement = window.use_keyed_state(
+        (ElementId::from(id.clone()), "height-measured"),
+        cx,
+        |_, _| false,
+    );
+    let duration = measurement.update(cx, |previously_measured, _| {
+        user_message_height_duration(reduced_motion, target.is_some(), previously_measured)
+    });
+    // Keep the channel settled when measurement fails, but leave the text uncapped.
+    let height = transition(
+        (id, "max-height"),
+        target.unwrap_or(px(USER_MESSAGE_COLLAPSED_MAX_HEIGHT)),
+        Transition::new(duration).ease(gpui_kit::base::animation::cubic_bezier(
+            USER_MESSAGE_HEIGHT_EASE[0],
+            USER_MESSAGE_HEIGHT_EASE[1],
+            USER_MESSAGE_HEIGHT_EASE[2],
+            USER_MESSAGE_HEIGHT_EASE[3],
+        )),
+        window,
+        cx,
+    );
+    target.map(|_| height)
+}
+
+fn user_message_content_frame(font_size: Pixels, max_height: Option<Pixels>) -> Div {
+    div()
+        .min_w_0()
+        .text_size(font_size)
+        .line_height(user_message_line_height(font_size))
+        .overflow_hidden()
+        .when_some(max_height, |body, height| body.max_h(height))
+}
+
+fn user_message_fade_height(measured_height: Option<Pixels>, max_height: Option<Pixels>) -> Pixels {
+    let cap = max_height.unwrap_or(px(USER_MESSAGE_COLLAPSED_MAX_HEIGHT));
+    measured_height.unwrap_or(cap).min(cap) * 0.3
+}
+
+fn user_message_line_height(font_size: Pixels) -> Pixels {
+    // Ordinary user content inherits Tailwind preflight's unitless leading.
+    font_size * 1.5
+}
+
 /// Separates the user's prompt text from an engine-injected epilogue (e.g., quality
 /// standards, result JSON schema, or engine instructions).
 ///
-/// Matches ZCode `splitUserInputEpilogue`:
+/// Matches Pi Desktop `splitUserInputEpilogue`:
 /// - If `epilogue_start` is Some, out-of-bounds yields no epilogue; in-bounds splits.
 /// - If `epilogue_start` is None, auto-detects the standard engine rule separator `\n\n---\n`.
-pub(crate) fn split_user_input_epilogue<'a>(
-    text: &'a str,
+pub(crate) fn split_user_input_epilogue(
+    text: &str,
     epilogue_start: Option<usize>,
-) -> (&'a str, Option<&'a str>) {
+) -> (&str, Option<&str>) {
     let start = match epilogue_start {
         Some(pos) => {
             if pos > text.len() {
@@ -5159,11 +5175,11 @@ pub(crate) fn split_user_input_epilogue<'a>(
 }
 
 /// Trims leading whitespace and the leading `---` separator line from the epilogue,
-/// matching ZCode's `trimEpilogueLead`.
+/// matching Pi Desktop's `trimEpilogueLead`.
 pub(crate) fn trim_epilogue_lead(text: &str) -> &str {
     let mut trimmed = text.trim_start();
     if let Some(rest) = trimmed.strip_prefix("---") {
-        let rest = rest.trim_start_matches(|c: char| c == ' ' || c == '\t');
+        let rest = rest.trim_start_matches([' ', '\t']);
         if let Some(after_newline) = rest.strip_prefix('\n') {
             trimmed = after_newline;
         } else if let Some(after_crlf) = rest.strip_prefix("\r\n") {
@@ -5289,7 +5305,7 @@ fn execute_command_overflows(measured_height: Pixels) -> bool {
     measured_height.as_f32() > EXECUTE_COMMAND_LINE_PX * 3. + 1.
 }
 
-/// `zcode-stream-text-in`: 900ms, cubic-bezier(0.16, 1, 0.3, 1). The stylesheet
+/// `pi-stream-text-in`: 900ms, cubic-bezier(0.16, 1, 0.3, 1). The stylesheet
 /// leaves the per-token delay at 0, so one update fades together.
 fn assistant_stream_motion() -> gpui_kit::base::TextViewMotion {
     gpui_kit::base::TextViewMotion::default()
@@ -5318,18 +5334,18 @@ fn assistant_markdown(
     view
 }
 
-/// ZCode `rounded-xl` on markdown tables and fenced code.
+/// Pi Desktop `rounded-xl` on markdown tables and fenced code.
 const ASSISTANT_TABLE_RADIUS: Pixels = px(12.);
 const ASSISTANT_CODE_RADIUS: Pixels = px(12.);
-/// ZCode code blocks default to 14px monospace. The renderer otherwise uses 13px.
+/// Pi Desktop code blocks default to 14px monospace. The renderer otherwise uses 13px.
 const ASSISTANT_CODE_FONT: Pixels = px(14.);
-/// ZCode `py-2`. Horizontal cell padding stays the renderer's 12px `px-3`.
+/// Pi Desktop `py-2`. Horizontal cell padding stays the renderer's 12px `px-3`.
 const ASSISTANT_TABLE_CELL_PADDING_Y: Pixels = px(8.);
 /// Streamdown `space-y-4`. One rem is 16px at the default root size.
 const ASSISTANT_BLOCK_GAP_REM: f32 = 1.;
 /// Added above a heading so the previous 16px block gap plus this padding is `mt-6`.
 const ASSISTANT_HEADING_PADDING_TOP: f32 = 8.;
-/// ZCode heading `mb-4`.
+/// Pi Desktop heading `mb-4`.
 const ASSISTANT_HEADING_PADDING_BOTTOM: f32 = 16.;
 
 fn assistant_table_frame(colors: &ThemeColors) -> gpui::StyleRefinement {
@@ -5496,6 +5512,29 @@ fn next_greeting_delay_ms(hour: u32, minute: u32, second: u32, millis: u32) -> u
     u64::from((24 + 5) * 3_600_000 - now).max(1)
 }
 
+fn draft_greeting_width(content_width: Pixels) -> Pixels {
+    (content_width - px(32.)).max(px(0.)).min(px(672.))
+}
+
+fn draft_greeting_frame(content_width: Pixels, viewport_width: Pixels) -> Div {
+    div()
+        .relative()
+        .w(draft_greeting_width(content_width))
+        .flex_shrink_0()
+        .mb(px(if viewport_width < px(640.) { 40. } else { 32. }))
+}
+
+fn draft_greeting_text(font_size: f32, colors: &ThemeColors) -> Div {
+    div()
+        .w_full()
+        .px(px(16.))
+        .text_center()
+        .text_size(px(font_size))
+        .line_height(px(font_size * 1.2))
+        .font_medium()
+        .text_color(rgb(colors.text_primary))
+}
+
 /// 30px until the measured line no longer fits, then 1px steps down to 20.
 fn resolve_greeting_font_size(available_width: f32, natural_width: f32) -> f32 {
     if !available_width.is_finite()
@@ -5512,7 +5551,7 @@ fn resolve_greeting_font_size(available_width: f32, natural_width: f32) -> f32 {
     }
 }
 
-/// Draft suggestion chip from ZCode `ConversationDraftSuggestedPrompts`.
+/// Draft suggestion chip from Pi Desktop `ConversationDraftSuggestedPrompts`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DraftSuggestedPrompt {
     pub id: &'static str,
@@ -5558,8 +5597,7 @@ pub const DRAFT_SUGGESTED_PROMPTS: &[DraftSuggestedPrompt] = &[
     },
 ];
 
-/// Error banner tone follows ZCode's `ChatErrorBanner`: stopped runs stay neutral,
-/// while provider and runtime errors use destructive treatment.
+/// Keep local stop semantics distinct inside the reference's neutral error surface.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ErrorBannerTone {
     Stopped,
@@ -5662,7 +5700,7 @@ fn format_clock(hour: u32, minute: u32, chinese: bool) -> String {
     format!("{hour12:02}:{minute:02} {period}")
 }
 
-/// ZCode message time: clock today, yesterday plus clock, otherwise the locale date.
+/// Pi Desktop message time: clock today, yesterday plus clock, otherwise the locale date.
 fn format_message_time(message: CivilTime, now: CivilTime, chinese: bool) -> String {
     let clock = format_clock(message.hour, message.minute, chinese);
     let message_day = civil_day_number(message);
@@ -5694,7 +5732,7 @@ fn format_message_time(message: CivilTime, now: CivilTime, chinese: bool) -> Str
     }
 }
 
-/// ZCode keeps the action row in layout at opacity 0, then shows it for row hover
+/// Pi Desktop keeps the action row in layout at opacity 0, then shows it for row hover
 /// or for focus inside the action row (`group-hover` / `focus-within`).
 fn message_actions_are_revealed(row_hovered: bool, action_focus_within: bool) -> bool {
     row_hovered || action_focus_within
@@ -5737,40 +5775,49 @@ fn message_action_opacity(
     )
 }
 
-/// ZCode hides a disclosure chevron until its trigger is hovered or the body is open.
+/// Pi Desktop hides a disclosure chevron until its trigger is hovered or the body is open.
 fn summary_disclosure_is_visible(expanded: bool, hovered: bool) -> bool {
     expanded || hovered
 }
 
-fn disclosure_motion(
+struct DisclosureMotionOptions {
     id: SharedString,
     revealed: bool,
     expanded: bool,
     reduced_motion: bool,
     duration_ms: u64,
     ease: [f32; 4],
+}
+
+fn disclosure_motion(
+    options: DisclosureMotionOptions,
     window: &mut Window,
     cx: &mut App,
 ) -> (f32, f32) {
     use gpui_kit::base::{transition, Transition};
-    let policy = Transition::new(std::time::Duration::from_millis(if reduced_motion {
-        0
-    } else {
-        duration_ms
-    }))
+    let policy = Transition::new(std::time::Duration::from_millis(
+        if options.reduced_motion {
+            0
+        } else {
+            options.duration_ms
+        },
+    ))
     .ease(gpui_kit::base::animation::cubic_bezier(
-        ease[0], ease[1], ease[2], ease[3],
+        options.ease[0],
+        options.ease[1],
+        options.ease[2],
+        options.ease[3],
     ));
     let opacity = transition(
-        (id.clone(), "opacity"),
-        if revealed { 1. } else { 0. },
+        (options.id.clone(), "opacity"),
+        if options.revealed { 1. } else { 0. },
         policy.clone(),
         window,
         cx,
     );
     let radians = transition(
-        (id, "angle"),
-        if expanded {
+        (options.id, "angle"),
+        if options.expanded {
             std::f32::consts::FRAC_PI_2
         } else {
             0.
@@ -5792,7 +5839,7 @@ struct ReasoningSummaryLine<'a> {
     text: &'a str,
 }
 
-/// Last non-empty reasoning line. ZCode treats both `\r` and `\n` as breaks, then trims.
+/// Last non-empty reasoning line. Pi Desktop treats both `\r` and `\n` as breaks, then trims.
 fn reasoning_streaming_summary_line(text: &str) -> Option<ReasoningSummaryLine<'_>> {
     let bytes = text.as_bytes();
     let mut start = 0;
@@ -6298,7 +6345,8 @@ fn message_time_label(timestamp_ms: i64, chinese: bool) -> Option<String> {
     ))
 }
 
-const LIGHT_EMPTY_LOGO_PATH: &str = "M398.97 0.5L147.576 319.5H1.03027L37.5996 273.081L120.167 169.603L120.171 169.598L215.342 47.5605L215.343 47.5615L252.424 0.5H398.97ZM264.544 273.271H372.527L336.082 319.498H189.886L202.642 303.307C217.584 284.34 240.398 273.271 264.544 273.271ZM209.164 0.5L202.786 8.58887C183.782 32.6885 154.782 46.752 124.091 46.752H25.9805L62.4268 0.5H209.164Z";
+const LIGHT_EMPTY_LOGO_PATH: &str =
+    "M336 62C284 24 220 12 163 26C83 46 34 98 34 160C34 222 83 274 163 294C220 308 284 296 336 258";
 
 fn light_empty_logo_svg(color: u32) -> String {
     let channel_r = (color >> 24) & 0xff;
@@ -6306,7 +6354,7 @@ fn light_empty_logo_svg(color: u32) -> String {
     let channel_b = (color >> 8) & 0xff;
     let opacity = ((color & 0xff) as f32 / 255.) * 0.7;
     format!(
-        "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 400 320\" fill=\"none\"><defs><linearGradient id=\"fade\" x1=\"0\" y1=\"0\" x2=\"0\" y2=\"1\"><stop offset=\"0%\" stop-color=\"white\"/><stop offset=\"70%\" stop-color=\"white\" stop-opacity=\"0\"/><stop offset=\"100%\" stop-color=\"white\" stop-opacity=\"0\"/></linearGradient><mask id=\"mark\"><rect width=\"400\" height=\"320\" fill=\"url(#fade)\"/></mask></defs><path d=\"{LIGHT_EMPTY_LOGO_PATH}\" stroke=\"rgb({channel_r},{channel_g},{channel_b})\" stroke-opacity=\"{opacity:.4}\" mask=\"url(#mark)\"/></svg>"
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 400 320\" fill=\"none\"><defs><linearGradient id=\"fade\" x1=\"0\" y1=\"0\" x2=\"0\" y2=\"1\"><stop offset=\"0%\" stop-color=\"white\"/><stop offset=\"70%\" stop-color=\"white\" stop-opacity=\"0\"/><stop offset=\"100%\" stop-color=\"white\" stop-opacity=\"0\"/></linearGradient><mask id=\"mark\"><rect width=\"400\" height=\"320\" fill=\"url(#fade)\"/></mask></defs><path d=\"{LIGHT_EMPTY_LOGO_PATH}\" stroke=\"rgb({channel_r},{channel_g},{channel_b})\" stroke-width=\"22\" stroke-linecap=\"round\" stroke-opacity=\"{opacity:.4}\" mask=\"url(#mark)\"/></svg>"
     )
 }
 
@@ -6351,22 +6399,207 @@ mod tests {
         reasoning_summary_is_overflowing, reasoning_summary_is_streaming,
         reasoning_summary_row_width, reasoning_summary_scroll_left, reasoning_summary_text_budget,
         replace_reasoning_roll, resolve_greeting_font_size, resolve_queued_summary_playback,
-        settle_reasoning_roll, sidebar_is_visible, split_user_input_epilogue,
+        settle_reasoning_roll, sidebar_is_visible, skills_list_surface, split_user_input_epilogue,
         summary_disclosure_is_visible, sync_reasoning_summary_roll, terminal_summary_hides_detail,
         tool_output_chrome, tool_summary_copy, transcript_content_width,
         transcript_message_is_work, transcript_row_top, transcript_turn_padding,
         trim_epilogue_lead, user_message_bubble_width, user_message_content_is_expandable,
-        visible_reasoning_summary, CivilTime, ErrorBannerTone, Glyph, GreetingSlot,
-        ReasoningSummaryRoll, SlashCommand, ThemeColors, ToolKindLabel, ToolSummaryPhase,
-        ASSISTANT_BLOCK_GAP_REM, ASSISTANT_CODE_FONT, ASSISTANT_CODE_RADIUS,
+        user_message_line_height, visible_reasoning_summary, CivilTime, ErrorBannerTone, Glyph,
+        GreetingSlot, ReasoningSummaryRoll, SlashCommand, ThemeColors, ToolKindLabel,
+        ToolSummaryPhase, ASSISTANT_BLOCK_GAP_REM, ASSISTANT_CODE_FONT, ASSISTANT_CODE_RADIUS,
         ASSISTANT_HEADING_PADDING_BOTTOM, ASSISTANT_HEADING_PADDING_TOP,
         ASSISTANT_TABLE_CELL_PADDING_Y, ASSISTANT_TABLE_RADIUS, DRAFT_SUGGESTED_PROMPTS,
         SIDEBAR_HIDE_BREAKPOINT, SIDEBAR_HISTORY_ROW_HEIGHT, SIDEBAR_NAV_RADIUS,
         SIDEBAR_NAV_ROW_HEIGHT, SIDEBAR_NAV_TO_TASKS_GAP, SIDEBAR_WIDTH,
         SUMMARY_ROLL_DRIFT_SKIP_MS, SUMMARY_ROLL_TOTAL_MS,
     };
-    use gpui_kit::px;
+    use gpui_kit::base::LengthExt;
+    use gpui_kit::{px, relative, rgb, FlexDirection, Hsla, Overflow, Styled};
     use pi_agent_core::Role;
+
+    #[test]
+    fn composer_insets_stay_fixed_when_interface_rem_size_changes() {
+        for empty in [false, true] {
+            let mut dock = super::composer_dock(empty);
+            let mut column = super::composer_column(px(672.), empty);
+            for rem_size in 12..=20 {
+                let rem = px(rem_size as f32);
+                let inset = if empty {
+                    dock.style().padding.left
+                } else {
+                    column.style().padding.left
+                };
+                assert_eq!(inset.unwrap().to_pixels(px(480.).into(), rem), px(16.));
+                let bottom = dock.style().padding.bottom;
+                assert_eq!(bottom, (!empty).then(|| px(16.).into()));
+            }
+            assert_eq!(dock.style().padding.left, empty.then(|| px(16.).into()));
+            assert_eq!(
+                column.style().padding.left,
+                (!empty).then(|| px(16.).into())
+            );
+            assert_eq!(column.style().max_size.width, Some(px(672.).into()));
+            assert_eq!(dock.style().flex_shrink, Some(0.));
+            assert_eq!(column.style().flex_shrink, Some(0.));
+            assert_eq!(column.style().min_size.width, Some(px(0.).into()));
+        }
+    }
+
+    #[test]
+    fn draft_bottom_dock_keeps_one_fixed_gap_and_natural_content_height() {
+        let mut dock = super::draft_bottom_dock();
+        let style = dock.style();
+        assert_eq!(style.size.width, Some(relative(1.).into()));
+        assert_eq!(style.min_size.width, Some(px(0.).into()));
+        assert_eq!(style.flex_direction, Some(FlexDirection::Column));
+        assert_eq!(style.flex_shrink, Some(0.));
+        assert_eq!(style.margin.top, Some(px(12.).into()));
+        assert!(style.size.height.is_none());
+        assert!(style.max_size.height.is_none());
+        assert!(style.overflow.y.is_none());
+        assert!(style.padding.top.is_none());
+        assert!(style.gap.height.is_none());
+        for rem in 12..=20 {
+            assert_eq!(
+                style
+                    .margin
+                    .top
+                    .unwrap()
+                    .to_pixels(px(640.).into(), px(rem as f32)),
+                Some(px(12.))
+            );
+        }
+    }
+
+    #[test]
+    fn composer_surface_spacing_is_fixed_without_resizing_the_editor() {
+        for colors in [ThemeColors::light(), ThemeColors::dark()] {
+            let mut surface = super::composer_input_surface(&colors);
+            let style = surface.style();
+            assert_eq!(style.size.width, Some(relative(1.).into()));
+            assert_eq!(style.min_size.width, Some(px(0.).into()));
+            assert_eq!(style.flex_direction, Some(FlexDirection::Column));
+            assert_eq!(style.overflow.x, Some(Overflow::Hidden));
+            assert_eq!(style.overflow.y, Some(Overflow::Hidden));
+            assert_eq!(style.corner_radii.top_left, Some(px(16.).into()));
+            assert_eq!(style.background, Some(gpui_kit::rgb(colors.dock_bg).into()));
+            assert_eq!(
+                style.border_color,
+                Some(gpui_kit::rgba(colors.dock_border).into())
+            );
+            assert!(style.size.height.is_none());
+            assert!(style.text.font_size.is_none());
+            for rem in 12..=20 {
+                for inset in [
+                    style.padding.left,
+                    style.padding.right,
+                    style.padding.top,
+                    style.padding.bottom,
+                    style.gap.width,
+                    style.gap.height,
+                ] {
+                    assert_eq!(
+                        inset.unwrap().to_pixels(px(480.).into(), px(rem as f32)),
+                        px(12.)
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn composer_context_header_keeps_reference_padding_and_wraps() {
+        let mut header = super::composer_context_header();
+        let style = header.style();
+        assert_eq!(style.min_size.width, Some(px(0.).into()));
+        assert_eq!(style.flex_wrap, Some(gpui_kit::FlexWrap::Wrap));
+        assert_eq!(style.gap.width, Some(px(0.).into()));
+        assert_eq!(style.gap.height, Some(px(0.).into()));
+        assert!(style.size.height.is_none());
+        for rem in 12..=20 {
+            for inset in [
+                style.padding.left,
+                style.padding.right,
+                style.padding.top,
+                style.padding.bottom,
+            ] {
+                assert_eq!(
+                    inset.unwrap().to_pixels(px(480.).into(), px(rem as f32)),
+                    px(6.)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn composer_workspace_frame_keeps_reference_insets_and_width_limit() {
+        for colors in [ThemeColors::light(), ThemeColors::dark()] {
+            for label in ["选择项目", "Select Project"] {
+                let mut button = super::composer_workspace_button(label, px(20.), &colors);
+                let style = button.style();
+                assert_eq!(style.size.height, Some(px(28.).into()));
+                assert!(style.size.width.is_none());
+                assert_eq!(style.min_size.width, Some(px(0.).into()));
+                assert_eq!(style.max_size.width, Some(px(240.).into()));
+                assert_eq!(style.border_widths.left, Some(px(1.).into()));
+                for rem in 12..=20 {
+                    assert_eq!(
+                        style
+                            .padding
+                            .left
+                            .unwrap()
+                            .to_pixels(px(480.).into(), px(rem as f32)),
+                        px(12.)
+                    );
+                    assert_eq!(
+                        style
+                            .padding
+                            .right
+                            .unwrap()
+                            .to_pixels(px(480.).into(), px(rem as f32)),
+                        px(8.)
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn composer_workspace_text_scales_without_changing_fixed_spacing() {
+        for colors in [ThemeColors::light(), ThemeColors::dark()] {
+            for label in ["选择项目", "Select Project"] {
+                for size in 12..=20 {
+                    let mut content =
+                        super::composer_workspace_content(label, px(size as f32), &colors);
+                    let style = content.style();
+                    assert_eq!(style.text.font_size, Some(px(size as f32).into()));
+                    assert_eq!(style.text.line_height, Some(relative(1.625)));
+                    assert_eq!(style.gap.width, Some(px(4.).into()));
+                    assert_eq!(style.min_size.width, Some(px(0.).into()));
+                    assert_eq!(
+                        style.text.color,
+                        Some(gpui_kit::rgb(colors.text_primary).into())
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn skills_list_keeps_its_natural_height_for_the_parent_scroll_region() {
+        for colors in [ThemeColors::light(), ThemeColors::dark()] {
+            let mut list = skills_list_surface(&colors);
+            let style = list.style();
+            assert_eq!(style.flex_shrink, Some(0.));
+            assert_eq!(style.flex_direction, Some(FlexDirection::Column));
+            assert_eq!(style.size.width, Some(relative(1.).into()));
+            assert_eq!(style.min_size.width, Some(px(0.).into()));
+            assert!(style.size.height.is_none());
+            assert!(style.max_size.height.is_none());
+            assert_eq!(style.overflow.x, Some(Overflow::Hidden));
+            assert_eq!(style.overflow.y, Some(Overflow::Hidden));
+        }
+    }
 
     #[test]
     fn sidebar_visibility_and_chat_width_share_the_820px_breakpoint() {
@@ -6848,6 +7081,306 @@ mod tests {
     }
 
     #[test]
+    fn user_bubble_spacing_and_measurement_share_fixed_insets() {
+        for colors in [ThemeColors::light(), ThemeColors::dark()] {
+            for content_width in [px(480.), px(623.), px(624.), px(864.), px(1280.)] {
+                let width = user_message_bubble_width(content_width);
+                let mut bubble = super::user_message_bubble_frame(width, &colors);
+                let style = bubble.style();
+                assert_eq!(style.min_size.width, Some(px(0.).into()));
+                assert_eq!(style.max_size.width, Some(width.into()));
+                assert!(style.size.width.is_none());
+                assert_eq!(
+                    style.background,
+                    Some(gpui_kit::rgba(colors.card_user_bg).into())
+                );
+                assert_eq!(
+                    style.border_color,
+                    Some(gpui_kit::rgba(colors.card_border).into())
+                );
+                assert_eq!(style.corner_radii.top_left, Some(px(12.).into()));
+                assert_eq!(style.corner_radii.top_right, Some(px(2.).into()));
+                for border in [
+                    style.border_widths.left,
+                    style.border_widths.right,
+                    style.border_widths.top,
+                    style.border_widths.bottom,
+                ] {
+                    assert_eq!(border, Some(px(1.).into()));
+                }
+                for size in 12..=20 {
+                    let rem = px(size as f32);
+                    let left = style.padding.left.unwrap().to_pixels(width.into(), rem);
+                    let right = style.padding.right.unwrap().to_pixels(width.into(), rem);
+                    assert_eq!(left, px(16.));
+                    assert_eq!(right, px(16.));
+                    assert_eq!(
+                        super::user_message_text_width(width),
+                        width - left - right - px(2.)
+                    );
+                    for inset in [style.padding.top, style.padding.bottom] {
+                        assert_eq!(inset.unwrap().to_pixels(width.into(), rem), px(12.));
+                    }
+                    for gap in [style.gap.width, style.gap.height] {
+                        assert_eq!(gap.unwrap().to_pixels(width.into(), rem), px(8.));
+                    }
+                }
+            }
+        }
+        for width in [px(0.), px(1.), px(33.), px(34.), px(35.)] {
+            assert_eq!(super::user_message_text_width(width), px(1.));
+        }
+    }
+
+    #[test]
+    fn user_disclosure_keeps_the_reference_icon_padding_and_frame() {
+        let mut button = super::user_message_disclosure_button("message-disclosure", false);
+        let style = button.style();
+        assert_eq!(style.size.width, Some(px(34.).into()));
+        assert_eq!(style.size.height, Some(px(24.).into()));
+        assert_eq!(style.padding.left, Some(px(8.).into()));
+        assert_eq!(style.padding.right, Some(px(8.).into()));
+        for border in [
+            style.border_widths.left,
+            style.border_widths.right,
+            style.border_widths.top,
+            style.border_widths.bottom,
+        ] {
+            assert_eq!(border, Some(px(1.).into()));
+        }
+    }
+
+    #[test]
+    fn user_disclosure_shadow_converts_css_blur_to_gpui_sigma() {
+        use gpui_kit::{hsla, point};
+
+        for expanded in [false, true] {
+            let mut button = super::user_message_disclosure_button("message-disclosure", expanded);
+            let shadows = button.style().box_shadow.as_ref().unwrap();
+            assert_eq!(shadows.len(), 2);
+            for (shadow, blur, spread) in [
+                (&shadows[0], px(1.5), px(0.)),
+                (&shadows[1], px(1.), px(-1.)),
+            ] {
+                assert_eq!(shadow.offset, point(px(0.), px(1.)));
+                assert_eq!(shadow.blur_radius, blur);
+                assert_eq!(shadow.spread_radius, spread);
+                assert_eq!(shadow.color, hsla(0., 0., 0., 0.1));
+                assert!(!shadow.inset);
+            }
+        }
+    }
+
+    #[test]
+    fn user_disclosure_paint_matches_hover_and_expanded_reference_states() {
+        for colors in [ThemeColors::light(), ThemeColors::dark()] {
+            for expanded in [false, true] {
+                for hovered in [false, true] {
+                    let paint = super::user_message_disclosure_paint(&colors, hovered, expanded);
+                    let expected_background: Hsla = if hovered || expanded {
+                        rgb(colors.dock_bg).alpha(0.5).into()
+                    } else {
+                        rgb(colors.root_bg).into()
+                    };
+                    let expected_border: Hsla = gpui_kit::rgba(if hovered {
+                        colors.dock_border_active
+                    } else {
+                        colors.card_border
+                    })
+                    .into();
+                    assert_eq!(paint.background, expected_background);
+                    assert_eq!(paint.border, expected_border);
+                }
+            }
+            assert_eq!(
+                super::user_message_disclosure_paint(&colors, true, false),
+                super::user_message_disclosure_paint(&colors, true, true)
+            );
+            assert_ne!(
+                super::user_message_disclosure_paint(&colors, false, false),
+                super::user_message_disclosure_paint(&colors, false, true)
+            );
+        }
+    }
+
+    #[test]
+    fn user_disclosure_color_motion_respects_reduced_motion() {
+        assert_eq!(
+            super::user_message_disclosure_color_duration(false),
+            std::time::Duration::from_millis(150)
+        );
+        assert_eq!(
+            super::user_message_disclosure_color_duration(true),
+            std::time::Duration::ZERO
+        );
+    }
+
+    #[test]
+    fn user_epilogue_control_keeps_natural_height_and_reference_text() {
+        for colors in [ThemeColors::light(), ThemeColors::dark()] {
+            for label in ["工作流引擎指令", "Workflow engine instructions"] {
+                for expanded in [false, true] {
+                    for size in 12..=20 {
+                        let font_size = px(crate::desktop_state::ui_text_px(10., size));
+                        let mut button = super::user_epilogue_toggle(
+                            "epilogue-toggle",
+                            label,
+                            expanded,
+                            font_size,
+                            &colors,
+                        );
+                        let style = button.style();
+                        assert_eq!(style.text.font_size, Some(font_size.into()));
+                        assert_eq!(style.text.line_height, Some(relative(1.5)));
+                        assert_eq!(
+                            style.text.color,
+                            Some(gpui_kit::rgba(colors.foreground_subtlest).into())
+                        );
+                        assert_eq!(style.gap.width, Some(px(4.).into()));
+                        assert_eq!(style.corner_radii.top_left, Some(px(6.).into()));
+                        assert!(style.size.height.is_none());
+                        assert!(style.size.width.is_none());
+                        assert!(style.background.is_none());
+                        assert!(style.border_widths.left.is_none());
+                        assert_eq!(style.padding.left, Some(px(0.).into()));
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn user_message_measurement_uses_the_rendered_line_height() {
+        for size in 12..=20 {
+            let font_size = px(crate::desktop_state::ui_text_px(14., size));
+            let line_height = user_message_line_height(font_size);
+            assert_eq!(line_height, font_size * 1.5);
+            let fitting_lines = (120. / line_height.as_f32()).floor();
+            assert!(!user_message_content_is_expandable(
+                line_height * fitting_lines
+            ));
+            assert!(user_message_content_is_expandable(
+                line_height * (fitting_lines + 1.)
+            ));
+        }
+        let line_height = user_message_line_height(px(14.));
+        assert_eq!(line_height, px(21.));
+        assert!(!user_message_content_is_expandable(line_height * 5.));
+        assert!(user_message_content_is_expandable(line_height * 6.));
+    }
+
+    #[test]
+    fn expanded_user_messages_keep_the_collapse_control_after_reflow() {
+        for height in [None, Some(px(0.)), Some(px(84.)), Some(px(121.))] {
+            assert!(super::user_message_disclosure_is_visible(true, height));
+            assert!(!super::user_message_disclosure_is_visible(false, height));
+        }
+        for expanded in [false, true] {
+            assert!(super::user_message_disclosure_is_visible(
+                expanded,
+                Some(px(121.01))
+            ));
+        }
+    }
+
+    #[test]
+    fn user_message_height_targets_follow_state_and_current_measurements() {
+        for expanded in [false, true] {
+            assert_eq!(super::user_message_height_target(expanded, None), None);
+            for height in [0., 84., 120., 121., 300., 640.] {
+                assert_eq!(
+                    super::user_message_height_target(expanded, Some(px(height))),
+                    Some(px(if expanded { height.max(120.) } else { 120. }))
+                );
+            }
+        }
+        let states = [
+            (false, Some(px(300.)), Some(px(120.))),
+            (true, Some(px(300.)), Some(px(300.))),
+            (false, Some(px(300.)), Some(px(120.))),
+            (true, Some(px(640.)), Some(px(640.))),
+            (true, Some(px(84.)), Some(px(120.))),
+            (false, Some(px(84.)), Some(px(120.))),
+            (true, None, None),
+        ];
+        for (expanded, measured, target) in states {
+            assert_eq!(
+                super::user_message_height_target(expanded, measured),
+                target
+            );
+        }
+    }
+
+    #[test]
+    fn user_message_content_frame_clips_at_the_sampled_height_not_the_target() {
+        for height in [None, Some(px(120.)), Some(px(210.)), Some(px(300.))] {
+            let mut body = super::user_message_content_frame(px(14.), height);
+            let style = body.style();
+            assert_eq!(style.max_size.height, height.map(Into::into));
+            assert!(style.size.height.is_none());
+            assert_eq!(style.overflow.x, Some(Overflow::Hidden));
+            assert_eq!(style.overflow.y, Some(Overflow::Hidden));
+            assert_eq!(style.text.line_height, Some(px(21.).into()));
+        }
+    }
+
+    #[test]
+    fn user_message_motion_uses_reference_timing_and_immediate_fallbacks() {
+        assert_eq!(
+            super::user_message_height_duration(false, true, &mut true),
+            std::time::Duration::from_millis(300)
+        );
+        for (reduced, measured) in [(true, true), (true, false), (false, false)] {
+            assert_eq!(
+                super::user_message_height_duration(reduced, measured, &mut true),
+                std::time::Duration::ZERO
+            );
+        }
+        assert_eq!(super::USER_MESSAGE_HEIGHT_EASE, [0., 0., 0.2, 1.]);
+    }
+
+    #[test]
+    fn expanded_user_message_recovers_measurement_without_reclipping() {
+        let mut previously_measured = false;
+        for (measured, reduced, expected_target, expected_ms) in [
+            (Some(px(300.)), false, Some(px(300.)), 0),
+            (Some(px(300.)), false, Some(px(300.)), 300),
+            (None, false, None, 0),
+            (None, false, None, 0),
+            (Some(px(300.)), false, Some(px(300.)), 0),
+            (Some(px(640.)), false, Some(px(640.)), 300),
+            (Some(px(640.)), true, Some(px(640.)), 0),
+            (None, true, None, 0),
+            (Some(px(300.)), false, Some(px(300.)), 0),
+        ] {
+            let target = super::user_message_height_target(true, measured);
+            assert_eq!(target, expected_target);
+            assert_eq!(
+                super::user_message_height_duration(
+                    reduced,
+                    target.is_some(),
+                    &mut previously_measured,
+                ),
+                std::time::Duration::from_millis(expected_ms)
+            );
+            assert_eq!(previously_measured, measured.is_some());
+        }
+    }
+
+    #[test]
+    fn user_message_fade_tracks_the_last_thirty_percent_during_collapse() {
+        for (measured, cap, expected) in [
+            (Some(px(300.)), Some(px(300.)), px(90.)),
+            (Some(px(300.)), Some(px(210.)), px(63.)),
+            (Some(px(300.)), Some(px(120.)), px(36.)),
+            (Some(px(126.)), Some(px(300.)), px(37.8)),
+            (None, None, px(36.)),
+        ] {
+            assert!((super::user_message_fade_height(measured, cap) - expected).abs() < px(0.001));
+        }
+    }
+
+    #[test]
     fn user_bubbles_use_the_reference_width_and_overflow_tolerance() {
         assert_eq!(user_message_bubble_width(px(0.)), px(0.));
         assert_eq!(user_message_bubble_width(px(447.)), px(415.));
@@ -6986,6 +7519,49 @@ mod tests {
         assert_eq!(resolve_greeting_font_size(120., 360.), 20.);
         assert_eq!(resolve_greeting_font_size(0., 360.), 30.);
         assert_eq!(resolve_greeting_font_size(406., f32::NAN), 30.);
+    }
+
+    #[test]
+    fn draft_greeting_frame_matches_timeline_gutters_and_viewport_breakpoint() {
+        for (content, viewport, width, bottom) in [
+            (480., 480., 448., 40.),
+            (639., 639., 607., 40.),
+            (640., 640., 608., 32.),
+            (1200., 1200., 672., 32.),
+            (480., 1200., 448., 32.),
+            (24., 1200., 0., 32.),
+        ] {
+            let mut frame = super::draft_greeting_frame(px(content), px(viewport));
+            assert_eq!(frame.style().size.width, Some(px(width).into()));
+            assert_eq!(frame.style().margin.bottom, Some(px(bottom).into()));
+            assert_eq!(frame.style().flex_shrink, Some(0.));
+        }
+    }
+
+    #[test]
+    fn draft_greeting_measurement_matches_fixed_text_insets_at_every_interface_size() {
+        for colors in [ThemeColors::light(), ThemeColors::dark()] {
+            for content in [24., 480., 639., 640., 1200.] {
+                let width = super::draft_greeting_width(px(content));
+                let measured = (width - px(32.)).max(px(0.));
+                let mut text = super::draft_greeting_text(30., &colors);
+                let left = text.style().padding.left.unwrap();
+                let right = text.style().padding.right.unwrap();
+                for rem_size in 12..=20 {
+                    let rem = px(rem_size as f32);
+                    let rendered = (width
+                        - left.to_pixels(width.into(), rem)
+                        - right.to_pixels(width.into(), rem))
+                    .max(px(0.));
+                    assert_eq!(rendered, measured);
+                    assert_eq!(left.to_pixels(width.into(), rem), px(16.));
+                    assert_eq!(right.to_pixels(width.into(), rem), px(16.));
+                }
+            }
+        }
+        let available = super::draft_greeting_width(px(480.)) - px(32.);
+        assert_eq!(available, px(416.));
+        assert_eq!(resolve_greeting_font_size(available / px(1.), 448.), 27.);
     }
 
     #[test]

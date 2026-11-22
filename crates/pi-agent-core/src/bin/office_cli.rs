@@ -134,7 +134,7 @@ fn main() -> Result<()> {
             }
             let content = fs::read_to_string(&file)?;
             let table = TableData::parse_markdown(&content)?;
-            println!("{}", table.to_csv(','));
+            print!("{}", table.to_csv(','));
         }
         ("table", "stats") => {
             let file = get_arg(&args, "--file")
@@ -178,15 +178,23 @@ fn main() -> Result<()> {
                 get_arg(&args, "--title").unwrap_or_else(|| "年度战略与业务规划汇报".to_string());
             let topic =
                 get_arg(&args, "--topic").unwrap_or_else(|| "面向高绩效交付的工程赋能".to_string());
-            let slides_count: usize = get_arg(&args, "--slides")
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(5);
+            let slides_count = if args.iter().any(|arg| arg == "--slides") {
+                get_arg(&args, "--slides")
+                    .ok_or_else(|| anyhow::anyhow!("Missing --slides value"))?
+                    .parse::<usize>()
+                    .map_err(|_| anyhow::anyhow!("Invalid --slides value"))?
+            } else {
+                5
+            };
             let md = SlidesGenerator::generate_markdown_slides(
                 &title,
                 &topic,
                 slides_count,
-                Some("Volt Office"),
-            );
+                Some(&format!(
+                    "{} Office",
+                    pi_agent_core::AppIdentity::from_environment().brand_name
+                )),
+            )?;
 
             if let Some(out_path) = get_arg(&args, "--out") {
                 fs::write(&out_path, &md)?;

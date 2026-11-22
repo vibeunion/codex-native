@@ -98,6 +98,52 @@ pub(super) fn unregister_windows_uninstall() -> Result<()> {
     run_powershell("$path = 'Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\Volt'; if ([Microsoft.Win32.Registry]::CurrentUser.GetSubKeyNames() -contains 'Software') { [Microsoft.Win32.Registry]::CurrentUser.DeleteSubKeyTree($path, $false) }", None).map(|_| ())
 }
 
+pub(super) fn register_windows_agentconfig_protocol(executable: &Path) -> Result<()> {
+    let key = "HKCU\\Software\\Classes\\agentconfig";
+    let command_key = format!("{key}\\shell\\open\\command");
+    let open_command = format!("\"{}\" \"%1\"", executable.display());
+    for (path, name, value) in [
+        (key, "", "URL:AgentConfig Bundle"),
+        (key, "URL Protocol", ""),
+        (command_key.as_str(), "", open_command.as_str()),
+    ] {
+        let mut command = std::process::Command::new("reg");
+        command.args(["add", path]);
+        if name.is_empty() {
+            command.arg("/ve");
+        } else {
+            command.args(["/v", name]);
+        }
+        let status = command.args(["/t", "REG_SZ", "/d", value, "/f"]).status()?;
+        if !status.success() {
+            anyhow::bail!("AgentConfig protocol registration failed ({status})");
+        }
+    }
+    Ok(())
+}
+
+pub(super) fn unregister_windows_agentconfig_protocol(executable: &Path) -> Result<()> {
+    let script = r#"
+$path = 'Software\Classes\agentconfig'
+$key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey("$path\shell\open\command")
+if ($null -ne $key) {
+    try { $command = $key.GetValue('') } finally { $key.Dispose() }
+    if ($command -ceq ('"' + $env:VOLT_PROTOCOL_EXE + '" "%1"')) {
+        [Microsoft.Win32.Registry]::CurrentUser.DeleteSubKeyTree($path, $false)
+    }
+}
+"#;
+    let output = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-Command"])
+        .arg(format!("$ErrorActionPreference = 'Stop'; {script}"))
+        .env("VOLT_PROTOCOL_EXE", executable)
+        .output()?;
+    if !output.status.success() {
+        anyhow::bail!("AgentConfig protocol removal failed ({})", output.status);
+    }
+    Ok(())
+}
+
 pub(super) fn schedule_self_delete(dir: &Path) -> Result<()> {
     // Wait for this process, then remove only our executable. Preserve other files.
     let script = format!(

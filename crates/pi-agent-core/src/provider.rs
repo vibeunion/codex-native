@@ -1,23 +1,52 @@
-use anyhow::{Context, Result};
+mod stream;
+#[cfg(test)]
+mod tests;
+
+use anyhow::{bail, Context, Result};
 use futures::StreamExt;
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
 use serde_json::{json, Value};
+use std::time::Duration;
 use tokio::sync::mpsc;
 
-use crate::types::{AgentEvent, Message, ModelConfig, Role, ToolCall};
+use crate::types::{AgentEvent, Message, ModelConfig, Role};
+use stream::ResponseStream;
+
+#[derive(Clone, Copy)]
+struct RequestTimeouts {
+    total: Duration,
+    headers: Duration,
+    idle: Duration,
+}
+
+impl Default for RequestTimeouts {
+    fn default() -> Self {
+        Self {
+            total: Duration::from_secs(300),
+            headers: Duration::from_secs(30),
+            idle: Duration::from_secs(60),
+        }
+    }
+}
 
 #[derive(Clone)]
 pub struct LlmClient {
     client: reqwest::Client,
+    timeouts: RequestTimeouts,
 }
 
 impl LlmClient {
     pub fn new() -> Self {
+        Self::with_timeouts(RequestTimeouts::default())
+    }
+
+    fn with_timeouts(timeouts: RequestTimeouts) -> Self {
         Self {
             client: reqwest::Client::builder()
-                .connect_timeout(std::time::Duration::from_secs(10))
+                .connect_timeout(Duration::from_secs(10))
                 .build()
-                .unwrap_or_default(),
+                .expect("failed to initialize the LLM HTTP client"),
+            timeouts,
         }
     }
 
@@ -28,270 +57,109 @@ impl LlmClient {
         tools: Option<Value>,
         tx: mpsc::Sender<AgentEvent>,
     ) -> Result<Message> {
-        let base = config
-            .api_base
-            .as_deref()
-            .unwrap_or("https://api.openai.com/v1");
-        let trimmed = base.trim_end_matches('/');
-        let url = if trimmed.ends_with("/chat/completions") {
-            trimmed.to_string()
-        } else {
-            format!("{}/chat/completions", trimmed)
-        };
+        let completed = self.stream_chat_inner(config, messages, tools, tx).await;
+        completed.map_err(|error| {
+            anyhow::anyhow!(redact_credential(
+                &format!("{error:#}"),
+                config.api_key.as_deref()
+            ))
+        })
+    }
 
-        let mut headers = HeaderMap::new();
-        headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-        if let Some(key) = &config.api_key {
-            if let Ok(val) = HeaderValue::from_str(&format!("Bearer {}", key.trim())) {
-                headers.insert(AUTHORIZATION, val);
-            }
-        }
-
-        let api_messages: Vec<Value> = messages
-            .iter()
-            .map(|m| {
-                let role = match m.role {
-                    Role::System => "system",
-                    Role::User => "user",
-                    Role::Assistant => "assistant",
-                    Role::Tool => "tool",
-                };
-                let mut obj = json!({
-                    "role": role,
-                    "content": m.content,
-                });
-                if let Some(tool_calls) = &m.tool_calls {
-                    let tc_val: Vec<Value> = tool_calls
-                        .iter()
-                        .map(|tc| {
-                            json!({
-                                "id": tc.id,
-                                "type": "function",
-                                "function": {
-                                    "name": tc.name,
-                                    "arguments": tc.arguments.to_string(),
-                                }
-                            })
-                        })
-                        .collect();
-                    obj["tool_calls"] = Value::Array(tc_val);
-                }
-                if let Some(tr) = &m.tool_result {
-                    obj["tool_call_id"] = json!(tr.tool_call_id);
-                }
-                obj
-            })
-            .collect();
-
-        let mut body = json!({
-            "model": config.model,
-            "messages": api_messages,
-            "stream": true,
-            "temperature": config.temperature,
-        });
-
-        if let Some(max_tokens) = config.max_tokens {
-            body["max_tokens"] = json!(max_tokens);
-        }
-
-        if let Some(tools_schema) = tools {
-            if tools_schema
-                .as_array()
-                .map(|a| !a.is_empty())
-                .unwrap_or(false)
-            {
-                body["tools"] = tools_schema;
-            }
-        }
-
-        let response = self
+    async fn stream_chat_inner(
+        &self,
+        config: &ModelConfig,
+        messages: &[Message],
+        tools: Option<Value>,
+        tx: mpsc::Sender<AgentEvent>,
+    ) -> Result<Message> {
+        let deadline = tokio::time::Instant::now() + self.timeouts.total;
+        let request = self
             .client
-            .post(&url)
-            .headers(headers)
-            .json(&body)
-            .send()
+            .post(request_url(config.api_base.as_deref())?)
+            .headers(request_headers(config.api_key.as_deref())?)
+            .json(&request_body(config, messages, tools)?);
+        let header_deadline = deadline.min(tokio::time::Instant::now() + self.timeouts.headers);
+        let response = tokio::time::timeout_at(header_deadline, request.send())
             .await
-            .with_context(|| format!("Failed to send request to {}", url))?;
+            .context("LLM response headers timed out")?
+            .map_err(reqwest::Error::without_url)
+            .context("Failed to receive LLM response")?;
 
         if !response.status().is_success() {
-            let status = response.status();
-            let err_text = response.text().await.unwrap_or_default();
-            let err_msg = format!("LLM API returned error {}: {}", status, err_text);
-            let _ = tx.send(AgentEvent::Error(err_msg.clone())).await;
-            anyhow::bail!(err_msg);
+            let message = self.http_error(response, deadline).await;
+            let message = redact_credential(&message, config.api_key.as_deref());
+            let _ = tx.try_send(AgentEvent::Error(message.clone()));
+            bail!(message);
         }
+        tokio::time::timeout_at(deadline, self.read_stream(response, tx))
+            .await
+            .with_context(|| {
+                format!(
+                    "LLM request exceeded its {} second deadline; output may be incomplete",
+                    self.timeouts.total.as_secs()
+                )
+            })?
+    }
 
-        let mut stream = response.bytes_stream();
-        let mut full_text = String::new();
-        let mut full_reasoning = String::new();
-        let mut total_tokens = None;
-        let mut buffer = Vec::new();
-        let mut finished = false;
+    async fn http_error(
+        &self,
+        response: reqwest::Response,
+        deadline: tokio::time::Instant,
+    ) -> String {
+        let status = response.status();
+        // Diagnostic reads must never replace an already known HTTP failure with a timeout.
+        let details = match tokio::time::timeout_at(deadline, self.error_details(response)).await {
+            Ok(Ok(details)) => details,
+            Ok(Err(error)) => format!("error details unavailable: {error:#}"),
+            Err(_) => "error details exceeded the request deadline".to_owned(),
+        };
+        format!("LLM API returned error {status}: {details}")
+    }
 
-        // Accumulate tool calls: index -> (id, name, args_buf)
-        let mut pending_tool_calls: std::collections::BTreeMap<usize, (String, String, String)> =
-            std::collections::BTreeMap::new();
-
-        'streaming: loop {
-            let Some(chunk_res) =
-                tokio::time::timeout(std::time::Duration::from_secs(60), stream.next())
-                    .await
-                    .context("Stream stalled for 60 seconds; output may be incomplete")?
-            else {
+    async fn read_stream(
+        &self,
+        response: reqwest::Response,
+        tx: mpsc::Sender<AgentEvent>,
+    ) -> Result<Message> {
+        let mut bytes = response.bytes_stream();
+        let mut decoded = ResponseStream::default();
+        while let Some(chunk) = tokio::time::timeout(self.timeouts.idle, bytes.next())
+            .await
+            .context("LLM stream stalled; output may be incomplete")?
+        {
+            let chunk = chunk
+                .map_err(reqwest::Error::without_url)
+                .context("Failed to read LLM stream")?;
+            let parsed = decoded.push(&chunk);
+            for event in decoded.take_events() {
+                let _ = tx.send(event).await;
+            }
+            parsed?;
+            if decoded.is_done() {
                 break;
-            };
-            buffer.extend_from_slice(&chunk_res?);
-            if buffer.len() > 4 * 1024 * 1024 {
-                anyhow::bail!("Provider event exceeded 4 MiB");
-            }
-            while let Some(pos) = buffer.iter().position(|byte| *byte == b'\n') {
-                let line = String::from_utf8(buffer.drain(..=pos).collect())
-                    .context("Provider returned invalid UTF-8")?;
-                let line = line.trim();
-
-                if line.is_empty() || line.starts_with(':') {
-                    continue;
-                }
-
-                if let Some(data) = line.strip_prefix("data:") {
-                    let data = data.trim();
-                    if data == "[DONE]" {
-                        finished = true;
-                        break 'streaming;
-                    }
-
-                    {
-                        let val: Value =
-                            serde_json::from_str(data).context("Malformed provider event")?;
-                        validate_event_schema(&val)?;
-                        if val.get("error").is_some() {
-                            anyhow::bail!("Provider reported a streaming error");
-                        }
-                        // Extract usage metrics if returned by the provider
-                        if let Some(usage) = val.get("usage") {
-                            if let Some(tokens) = usage.get("total_tokens").and_then(|t| t.as_u64())
-                            {
-                                total_tokens = Some(tokens);
-                            }
-                        }
-
-                        if let Some(choices) = val.get("choices").and_then(|c| c.as_array()) {
-                            if let Some(first) = choices.first() {
-                                if let Some(reason) = first
-                                    .get("finish_reason")
-                                    .filter(|reason| !reason.is_null())
-                                {
-                                    let Some(reason) = reason.as_str() else {
-                                        anyhow::bail!("Invalid finish_reason schema");
-                                    };
-                                    if !matches!(reason, "stop" | "tool_calls") {
-                                        anyhow::bail!(
-                                            "Provider did not complete the response: {reason}"
-                                        );
-                                    }
-                                    finished = true;
-                                }
-                                if let Some(delta) = first.get("delta") {
-                                    // Handle reasoning / thought delta (e.g. DeepSeek R1 / SenseNova reasoning_content)
-                                    if let Some(reasoning_chunk) = delta
-                                        .get("reasoning_content")
-                                        .or_else(|| delta.get("reasoning"))
-                                        .and_then(|c| c.as_str())
-                                    {
-                                        if !reasoning_chunk.is_empty() {
-                                            full_reasoning.push_str(reasoning_chunk);
-                                            let _ = tx
-                                                .send(AgentEvent::Thought(
-                                                    reasoning_chunk.to_string(),
-                                                ))
-                                                .await;
-                                        }
-                                    }
-
-                                    // Handle content delta
-                                    if let Some(content_chunk) =
-                                        delta.get("content").and_then(|c| c.as_str())
-                                    {
-                                        if !content_chunk.is_empty() {
-                                            full_text.push_str(content_chunk);
-                                            let _ = tx
-                                                .send(AgentEvent::TextDelta(
-                                                    content_chunk.to_string(),
-                                                ))
-                                                .await;
-                                        }
-                                    }
-
-                                    // Handle streaming tool calls
-                                    if let Some(tc_list) =
-                                        delta.get("tool_calls").and_then(|t| t.as_array())
-                                    {
-                                        for tc in tc_list {
-                                            let index = tc
-                                                .get("index")
-                                                .and_then(|i| i.as_u64())
-                                                .unwrap_or(0)
-                                                as usize;
-                                            let entry = pending_tool_calls
-                                                .entry(index)
-                                                .or_insert_with(|| {
-                                                    (String::new(), String::new(), String::new())
-                                                });
-
-                                            if let Some(id) = tc.get("id").and_then(|s| s.as_str())
-                                            {
-                                                entry.0.push_str(id);
-                                            }
-                                            if let Some(func) = tc.get("function") {
-                                                if let Some(name) =
-                                                    func.get("name").and_then(|s| s.as_str())
-                                                {
-                                                    entry.1.push_str(name);
-                                                }
-                                                if let Some(args_chunk) =
-                                                    func.get("arguments").and_then(|s| s.as_str())
-                                                {
-                                                    entry.2.push_str(args_chunk);
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
             }
         }
-
-        if !finished {
-            anyhow::bail!("Provider disconnected before completion; partial output retained");
-        }
-        let mut final_tool_calls = Vec::new();
-        for (_, (id, name, args_str)) in pending_tool_calls {
-            if id.is_empty() || name.is_empty() {
-                anyhow::bail!("Incomplete tool call identity");
-            }
-            let parsed_args =
-                serde_json::from_str::<Value>(&args_str).context("Invalid tool arguments")?;
-            let tc = ToolCall {
-                id,
-                name,
-                arguments: parsed_args,
-            };
-            final_tool_calls.push(tc);
-        }
-
-        let mut assistant_msg = Message::assistant(full_text);
-        if !full_reasoning.is_empty() {
-            assistant_msg.reasoning = Some(full_reasoning);
-        }
-        if !final_tool_calls.is_empty() {
-            assistant_msg.tool_calls = Some(final_tool_calls);
-        }
-
+        let (message, total_tokens) = decoded.finish()?;
         let _ = tx.send(AgentEvent::Completed { total_tokens }).await;
-        Ok(assistant_msg)
+        Ok(message)
+    }
+
+    async fn error_details(&self, response: reqwest::Response) -> Result<String> {
+        const MAX_ERROR_BYTES: usize = 8 * 1024;
+        let mut bytes = response.bytes_stream();
+        let mut body = Vec::new();
+        while let Some(chunk) = tokio::time::timeout(self.timeouts.idle, bytes.next())
+            .await
+            .context("error response stalled")?
+        {
+            let chunk = chunk.map_err(reqwest::Error::without_url)?;
+            if body.len().saturating_add(chunk.len()) > MAX_ERROR_BYTES {
+                bail!("error response exceeds 8 KiB");
+            }
+            body.extend_from_slice(&chunk);
+        }
+        Ok(String::from_utf8_lossy(&body).into_owned())
     }
 }
 
@@ -301,27 +169,93 @@ impl Default for LlmClient {
     }
 }
 
-fn validate_event_schema(event: &Value) -> Result<()> {
-    if event.get("error").is_some() {
-        return Ok(());
+fn request_url(base: Option<&str>) -> Result<reqwest::Url> {
+    let mut url = reqwest::Url::parse(base.unwrap_or("https://api.openai.com/v1"))
+        .context("Invalid LLM endpoint")?;
+    if !matches!(url.scheme(), "http" | "https")
+        || url.host_str().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        bail!("LLM endpoint must be an HTTP(S) URL without credentials, query or fragment");
     }
-    if let Some(choices) = event.get("choices") {
-        let choices = choices.as_array().context("Invalid choices schema")?;
-        for choice in choices {
-            if !choice.is_object() {
-                anyhow::bail!("Invalid choice schema");
-            }
-            if let Some(delta) = choice.get("delta") {
-                if !delta.is_object() {
-                    anyhow::bail!("Invalid delta schema");
-                }
-            }
-            if choice.get("delta").is_none() && choice.get("finish_reason").is_none() {
-                anyhow::bail!("Choice is missing delta and finish_reason");
-            }
+    let path = url.path().trim_end_matches('/').to_owned();
+    if !path.ends_with("/chat/completions") {
+        url.set_path(&format!("{path}/chat/completions"));
+    } else {
+        url.set_path(&path);
+    }
+    Ok(url)
+}
+
+fn request_headers(key: Option<&str>) -> Result<HeaderMap> {
+    let mut headers = HeaderMap::new();
+    headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+    if let Some(key) = key {
+        if key.trim().is_empty() {
+            bail!("API credential is empty");
         }
-    } else if !event.get("usage").is_some_and(Value::is_object) {
-        anyhow::bail!("Provider event is missing choices and usage");
+        let mut authorization = HeaderValue::from_str(&format!("Bearer {}", key.trim()))
+            .context("Invalid API credential header")?;
+        authorization.set_sensitive(true);
+        headers.insert(AUTHORIZATION, authorization);
     }
-    Ok(())
+    Ok(headers)
+}
+
+fn request_body(config: &ModelConfig, messages: &[Message], tools: Option<Value>) -> Result<Value> {
+    if config.model.trim().is_empty()
+        || !config.temperature.is_finite()
+        || config.max_tokens == Some(0)
+    {
+        bail!("Invalid model, temperature or token limit");
+    }
+    let mut body = json!({
+        "model": config.model,
+        "messages": messages.iter().map(api_message).collect::<Vec<_>>(),
+        "stream": true,
+        "temperature": config.temperature,
+    });
+    if let Some(max_tokens) = config.max_tokens {
+        body["max_tokens"] = json!(max_tokens);
+    }
+    if let Some(tools) =
+        tools.filter(|tools| tools.as_array().is_some_and(|tools| !tools.is_empty()))
+    {
+        body["tools"] = tools;
+    }
+    Ok(body)
+}
+
+fn api_message(message: &Message) -> Value {
+    let role = match message.role {
+        Role::System => "system",
+        Role::User => "user",
+        Role::Assistant => "assistant",
+        Role::Tool => "tool",
+    };
+    let mut encoded = json!({"role": role, "content": message.content});
+    if let Some(calls) = &message.tool_calls {
+        encoded["tool_calls"] = json!(calls
+            .iter()
+            .map(|call| json!({
+                "id": call.id,
+                "type": "function",
+                "function": {"name": call.name, "arguments": call.arguments.to_string()},
+            }))
+            .collect::<Vec<_>>());
+    }
+    if let Some(receipt) = &message.tool_result {
+        encoded["tool_call_id"] = json!(receipt.tool_call_id);
+    }
+    encoded
+}
+
+fn redact_credential(text: &str, key: Option<&str>) -> String {
+    match key.map(str::trim).filter(|key| !key.is_empty()) {
+        Some(key) => text.replace(key, "[REDACTED_SECRET]"),
+        None => text.to_owned(),
+    }
 }

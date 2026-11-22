@@ -6,7 +6,17 @@ authors.workspace = true
 license.workspace = true
 description = "Pi coding agent core runtime written in pure Rust"
 
+[features]
+default = ["codex-harness", "pi-native"]
+codex-harness = []
+pi-native = []
+
 [dependencies]
+aes-gcm = "0.10.3"
+base64 = "0.22.1"
+pbkdf2 = "0.12.2"
+rand = "0.8.5"
+sha2 = "0.10.9"
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -17,13 +27,14 @@ futures = { workspace = true }
 tracing = { workspace = true }
 reqwest = { workspace = true }
 regex = { workspace = true }
-flate2 = "1.0"
+flate2 = "1.1.11"
+url = { version = "2.5.8", features = ["serde"] }
 
 [dev-dependencies]
-tempfile = "3.17"
+tempfile = "3.27.0"
 
 [target.'cfg(unix)'.dependencies]
-libc = "0.2"
+libc = "0.2.191"
 
 [[bin]]
 name = "office-cli"
@@ -36,3 +47,8 @@ path = "src/bin/calc_cli.rs"
 [[bin]]
 name = "sensenova-live-test"
 path = "src/bin/sensenova_live_test.rs"
+
+[[bin]]
+name = "codex-harness"
+path = "src/bin/codex_harness.rs"
+required-features = ["codex-harness"]

@@ -39,6 +39,10 @@ impl SkillRegistry {
         Self { skills: Vec::new() }
     }
 
+    pub fn skills(&self) -> &[Skill] {
+        &self.skills
+    }
+
     pub fn with_builtin_skills() -> Self {
         let mut reg = Self::new();
 
@@ -325,17 +329,17 @@ impl SkillRegistry {
             cli_examples: vec![
                 CliExample {
                     title: "生成审批确认卡片".to_string(),
-                    command: "volt-cli ui card --title \"生产部署审批\" --badge \"待确认\"".to_string(),
+                    command: "app-cli ui card --title \"生产部署审批\" --badge \"待确认\"".to_string(),
                     description: "生成包含目标集群、待发版本、确认/取消操作按钮的原生交互卡片。".to_string(),
                 },
                 CliExample {
                     title: "渲染 QPS 趋势图".to_string(),
-                    command: "volt-cli ui chart --type line --points \"120,150,220,310,290,450\"".to_string(),
+                    command: "app-cli ui chart --type line --points \"120,150,220,310,290,450\"".to_string(),
                     description: "基于 Metal GPU 硬件加速绘制平滑面积趋势曲线与关键极值统计。".to_string(),
                 },
                 CliExample {
                     title: "渲染业务份额环形图".to_string(),
-                    command: "volt-cli ui chart --type pie --donut --slices \"API:45,Web:30,Job:25\"".to_string(),
+                    command: "app-cli ui chart --type pie --donut --slices \"API:45,Web:30,Job:25\"".to_string(),
                     description: "原生绘制带图例与百分比标签的高清环形分布图。".to_string(),
                 },
             ],

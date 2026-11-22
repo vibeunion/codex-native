@@ -1,10 +1,11 @@
 use crate::theme::ThemeColors;
 use gpui_kit::base::{transition, Transition};
 use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants};
-use gpui_kit::component::{ActiveTheme, Disableable};
+use gpui_kit::component::{ActiveTheme, Disableable, FocusableExt, StyledExt};
 use gpui_kit::{
-    rgb, rgba, App, ElementId, HoverListenerMode, Hsla, InteractiveElement, IntoElement,
-    RenderOnce, SharedString, Styled, Window,
+    div, relative, rgb, rgba, App, Div, ElementId, HoverListenerMode, Hsla, InteractiveElement,
+    IntoElement, ParentElement, Pixels, RenderOnce, SharedString, StatefulInteractiveElement,
+    StyleRefinement, Styled, Window,
 };
 use std::time::Duration;
 
@@ -87,6 +88,65 @@ fn command_frame(button: Button, paint: &Paint, disabled: bool) -> Button {
         .bg(paint.background)
         .text_color(paint.foreground)
         .opacity(if disabled { 0.5 } else { 1. })
+        // Pi Desktop clears focus outlines/shadows globally; keep native focus handling.
+        .focus_ring(false)
+}
+
+fn padding_box_background(
+    style: &StyleRefinement,
+    background: Hsla,
+    rem_size: Pixels,
+) -> Option<Div> {
+    let border = style.border_widths.top?;
+    if border.to_pixels(rem_size) <= Pixels::ZERO
+        || [
+            style.border_widths.right,
+            style.border_widths.bottom,
+            style.border_widths.left,
+        ]
+        .iter()
+        .any(|width| *width != Some(border))
+    {
+        return None;
+    }
+    let inset = border.to_pixels(rem_size);
+    let radius =
+        |value: gpui_kit::AbsoluteLength| (value.to_pixels(rem_size) - inset).max(Pixels::ZERO);
+    // CSS bg-clip-padding leaves the transparent border outside the fill.
+    Some(
+        div()
+            .absolute()
+            .top(inset)
+            .right(inset)
+            .bottom(inset)
+            .left(inset)
+            .rounded_tl(radius(style.corner_radii.top_left?))
+            .rounded_tr(radius(style.corner_radii.top_right?))
+            .rounded_br(radius(style.corner_radii.bottom_right?))
+            .rounded_bl(radius(style.corner_radii.bottom_left?))
+            .bg(background),
+    )
+}
+
+fn command_observer(button: &mut Button) -> Div {
+    let mut observer = div().h_flex().flex_shrink_0();
+    let outer = observer.style();
+    let inner = button.style();
+    // Parent-facing layout belongs to the shell; paint and activation stay native.
+    outer.size.width = inner.size.width.take();
+    outer.min_size.width = inner.min_size.width.take();
+    outer.max_size.width = inner.max_size.width.take();
+    outer.margin = std::mem::take(&mut inner.margin);
+    outer.position = inner.position.take();
+    outer.inset = std::mem::take(&mut inner.inset);
+    outer.align_self = inner.align_self.take();
+    outer.flex_basis = inner.flex_basis.take();
+    outer.flex_grow = inner.flex_grow.take();
+    outer.flex_shrink = inner.flex_shrink.take().or(outer.flex_shrink);
+    if outer.size.width.is_some() {
+        inner.size.width = Some(relative(1.).into());
+    }
+    observer
 }
 
 #[derive(IntoElement)]
@@ -146,47 +206,66 @@ impl RenderOnce for SettingsCommand {
             cx,
         );
         let foreground = transition(
-            (self.id, "settings-command-foreground"),
+            (self.id.clone(), "settings-command-foreground"),
             paint.foreground,
             policy,
             window,
             cx,
         );
+        let mut button = self.button.disabled(self.disabled);
+        let background_layer =
+            padding_box_background(button.style(), background, window.rem_size());
+        let clipped = background_layer.is_some();
+        let button_background = if clipped {
+            rgba(0x00000000).into()
+        } else {
+            background
+        };
         let mut button = command_frame(
-            self.button.disabled(self.disabled).custom(
+            button.custom(
                 ButtonCustomVariant::new(cx)
-                    .color(background)
+                    // The library reuses this color for hover/active borders.
+                    .color(rgba(0x00000000).into())
                     .foreground(foreground)
-                    .hover(background)
-                    .active(background),
+                    .hover(button_background)
+                    .active(button_background),
             ),
             &Paint {
-                background,
+                background: button_background,
                 foreground,
             },
-            self.disabled,
+            self.disabled && !clipped,
         );
-        // Observe the real pointer even while disabled, without changing activation.
-        button
-            .interactivity()
-            .hover_listener_mode(HoverListenerMode::InputModalityIndependent);
-        button.interactivity().on_hover(move |hovered, window, cx| {
-            if pointer.read(cx) != hovered {
-                pointer.update(cx, |state, _| *state = *hovered);
-                window.refresh();
-            }
-        });
-        button
+        // A listener-only shell keeps hover accurate during a held native press.
+        command_observer(&mut button)
+            .id((ElementId::Name(self.id), "settings-command-observer"))
+            .hover_listener_mode(HoverListenerMode::InputModalityIndependent)
+            .on_hover(move |hovered, window, cx| {
+                if pointer.read(cx) != hovered {
+                    pointer.update(cx, |state, _| *state = *hovered);
+                    window.refresh();
+                }
+            })
+            .opacity(if self.disabled && clipped { 0.5 } else { 1. })
+            .children(background_layer)
+            .child(button)
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{command_frame, duration, CommandKind, COLOR_TRAVEL};
+    use super::{
+        command_frame, command_observer, duration, padding_box_background, CommandKind,
+        COLOR_TRAVEL,
+    };
+    use crate::settings::buttons::{api_key_visibility_button, save_button, secondary_button};
     use crate::theme::ThemeColors;
+    use crate::Language;
+    use gpui_kit::assets::IconName as Glyph;
     use gpui_kit::base::Interpolate;
     use gpui_kit::component::button::Button;
-    use gpui_kit::{px, rgb, rgba, Hsla, Styled};
+    use gpui_kit::component::FocusableExt;
+    use gpui_kit::{div, px, relative, rgb, rgba, Element, Hsla, Position, Styled};
     use std::time::Duration;
 
     const KINDS: [CommandKind; 5] = [
@@ -196,6 +275,167 @@ mod tests {
         CommandKind::Navigation { selected: true },
         CommandKind::Back,
     ];
+
+    #[test]
+    fn command_focus_paint_does_not_add_a_library_ring_or_change_geometry() {
+        for (colors, dark) in [(ThemeColors::light(), false), (ThemeColors::dark(), true)] {
+            for kind in KINDS {
+                for disabled in [false, true] {
+                    let mut button = save_button("Save Preferences", px(14.));
+                    assert!(button.is_focus_ring_enabled());
+                    let before = button.style().clone();
+                    let mut button = command_frame(
+                        button,
+                        &kind.paint(&colors, dark, false, disabled),
+                        disabled,
+                    );
+                    assert!(!button.is_focus_ring_enabled());
+                    let after = button.style();
+                    assert_eq!(after.size, before.size);
+                    assert_eq!(after.padding, before.padding);
+                    assert_eq!(after.margin, before.margin);
+                    assert_eq!(after.border_widths, before.border_widths);
+                    assert_eq!(after.corner_radii, before.corner_radii);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn action_fill_uses_the_padding_box_without_changing_the_button_frame() {
+        for language in [Language::Chinese, Language::English] {
+            for font_size in 12..=20 {
+                for (mut button, radius) in [
+                    (
+                        save_button(language.text().save_btn, px(font_size as f32)),
+                        7.,
+                    ),
+                    (
+                        secondary_button(
+                            "padding-box-secondary",
+                            "Use in task",
+                            Glyph::Plus,
+                            px(font_size as f32),
+                        ),
+                        5.,
+                    ),
+                    (api_key_visibility_button(true, language), 5.),
+                    (api_key_visibility_button(false, language), 5.),
+                ] {
+                    let before = button.style().clone();
+                    let color = Hsla::from(rgba(0xffffffcc));
+                    let mut layer =
+                        padding_box_background(button.style(), color, px(font_size as f32))
+                            .unwrap();
+                    assert_eq!(layer.a11y_role(), None);
+                    let style = layer.style();
+                    assert_eq!(style.position, Some(Position::Absolute));
+                    for inset in [
+                        style.inset.top,
+                        style.inset.right,
+                        style.inset.bottom,
+                        style.inset.left,
+                    ] {
+                        assert_eq!(inset, Some(px(1.).into()));
+                    }
+                    for corner in [
+                        style.corner_radii.top_left,
+                        style.corner_radii.top_right,
+                        style.corner_radii.bottom_right,
+                        style.corner_radii.bottom_left,
+                    ] {
+                        assert_eq!(corner, Some(px(radius).into()));
+                    }
+                    assert_eq!(style.background, Some(color.into()));
+                    assert!(style.size.width.is_none());
+                    assert!(style.size.height.is_none());
+                    assert!(style.border_widths.top.is_none());
+                    assert!(style.padding.left.is_none());
+                    assert_eq!(button.style(), &before);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn padding_box_leaves_borderless_or_incomplete_frames_on_the_native_path() {
+        let color = rgb(0xffffff).into();
+        for mut button in [
+            Button::new("borderless"),
+            Button::new("missing-radius").border_1(),
+            Button::new("zero").border_0(),
+            Button::new("asymmetric").border_1().border_l_2(),
+        ] {
+            assert!(padding_box_background(button.style(), color, px(14.)).is_none());
+        }
+        let mut frame = div().border_1().rounded(px(0.5));
+        let mut layer = padding_box_background(frame.style(), color, px(14.)).unwrap();
+        assert_eq!(layer.style().corner_radii.top_left, Some(px(0.).into()));
+    }
+
+    #[test]
+    fn pointer_shell_keeps_save_content_sized_and_leaves_its_frame_on_the_button() {
+        for language in [Language::Chinese, Language::English] {
+            for font_size in [12., 14., 20.] {
+                let mut button = save_button(language.text().save_btn, px(font_size));
+                let before = button.style().clone();
+                let mut observer = command_observer(&mut button);
+                let outer = observer.style();
+                assert!(outer.size.width.is_none());
+                assert!(outer.size.height.is_none());
+                assert_eq!(outer.align_self, before.align_self);
+                assert_eq!(outer.flex_shrink, Some(0.));
+                assert!(outer.background.is_none());
+                assert!(outer.border_widths.top.is_none());
+                assert!(outer.padding.left.is_none());
+                let inner = button.style();
+                assert_eq!(inner.size, before.size);
+                assert_eq!(inner.padding, before.padding);
+                assert_eq!(inner.border_widths, before.border_widths);
+                assert_eq!(inner.corner_radii, before.corner_radii);
+                assert!(inner.align_self.is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn pointer_shell_preserves_navigation_widths_and_back_margins() {
+        for mut button in [
+            Button::new("wide").w_full().h(px(32.)),
+            Button::new("compact").w(px(40.)).h(px(40.)).mx_auto(),
+            Button::new("back").w(px(244.)).h(px(32.)).m(px(4.)),
+        ] {
+            let before = button.style().clone();
+            let mut observer = command_observer(&mut button);
+            assert_eq!(observer.style().size.width, before.size.width);
+            assert_eq!(observer.style().margin, before.margin);
+            assert_eq!(button.style().size.width, Some(relative(1.).into()));
+            assert_eq!(button.style().size.height, before.size.height);
+            assert!(button.style().margin.top.is_none());
+            assert!(button.style().margin.left.is_none());
+        }
+    }
+
+    #[test]
+    fn pointer_shell_owns_absolute_key_placement_without_expanding_the_hit_target() {
+        let mut button = api_key_visibility_button(true, Language::English)
+            .absolute()
+            .right(px(6.))
+            .top(px(6.));
+        let mut observer = command_observer(&mut button);
+        let outer = observer.style();
+        assert_eq!(outer.position, Some(Position::Absolute));
+        assert_eq!(outer.inset.right, Some(px(6.).into()));
+        assert_eq!(outer.inset.top, Some(px(6.).into()));
+        assert_eq!(outer.size.width, Some(px(24.).into()));
+        assert!(outer.size.height.is_none());
+        let inner = button.style();
+        assert!(inner.position.is_none());
+        assert!(inner.inset.top.is_none());
+        assert!(inner.inset.right.is_none());
+        assert_eq!(inner.size.width, Some(relative(1.).into()));
+        assert_eq!(inner.size.height, Some(px(24.).into()));
+    }
 
     #[test]
     fn primary_keeps_black_white_ink_and_fades_only_the_fill_on_hover() {

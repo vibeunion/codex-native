@@ -1,4 +1,4 @@
-//! Viewport geometry adapted from ZCode 3.16.2 timeline-ledge.ts (Apache-2.0).
+//! Viewport geometry adapted from Pi Desktop 3.16.2 timeline-ledge.ts (Apache-2.0).
 //! These coordinates are logical pixels, independent of native display scale.
 
 use gpui_kit::{point, px, ScrollHandle};
@@ -161,9 +161,7 @@ impl Viewport {
             return None;
         }
         self.last_offset.set(Some(offset));
-        if previous.is_none() {
-            return None;
-        }
+        previous?;
         let until = now + SCROLLBAR_SCROLL_HOLD;
         self.scrolling_until.set(Some(until));
         Some(until)

@@ -1,4 +1,79 @@
 use super::*;
+use anyhow::{bail, Context as _, Result};
+use gpui_kit::component::notification::Notification;
+use std::ffi::OsStr;
+use std::io::Write;
+use std::path::{Path, PathBuf};
+
+struct HtmlPreviewNotice;
+
+fn launch_in_default_browser(target: &OsStr) -> Result<()> {
+    #[cfg(target_os = "macos")]
+    const OPENER: &str = "open";
+    #[cfg(target_os = "windows")]
+    const OPENER: &str = "explorer.exe";
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    const OPENER: &str = "xdg-open";
+    std::process::Command::new(OPENER)
+        .arg(target)
+        .spawn()
+        .context("无法启动默认浏览器")?;
+    Ok(())
+}
+
+fn external_http_url(url: &str) -> Result<reqwest::Url> {
+    let parsed = reqwest::Url::parse(url).context("链接格式无效")?;
+    if !matches!(parsed.scheme(), "http" | "https")
+        || parsed.host_str().is_none()
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+    {
+        bail!("只允许打开不含凭据的 HTTP(S) 链接");
+    }
+    Ok(parsed)
+}
+
+pub fn open_external_url(url: &str) -> Result<()> {
+    let parsed = external_http_url(url)?;
+    launch_in_default_browser(OsStr::new(parsed.as_str()))
+}
+
+fn write_artifact_file(file_path: &Path, content: &str) -> Result<()> {
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(file_path).context("无法创建 HTML 产物")?;
+    file.write_all(content.as_bytes())
+        .context("无法写入 HTML 产物")
+}
+
+pub fn open_html_artifact(
+    content: &str,
+    is_dark: bool,
+    colors: &crate::theme::ThemeColors,
+) -> Result<PathBuf> {
+    if content.len() > crate::generative_ui::MAX_ARTIFACT_BYTES {
+        bail!(
+            "HTML 产物超过 {} 字节限制",
+            crate::generative_ui::MAX_ARTIFACT_BYTES
+        );
+    }
+    let themed_html =
+        crate::generative_ui::inject_theme_variables_to_html(content, is_dark, colors);
+    let file_path =
+        std::env::temp_dir().join(format!("app_web_{}.html", crate::desktop_state::new_id()));
+    write_artifact_file(&file_path, &themed_html)?;
+    if let Err(error) = launch_in_default_browser(file_path.as_os_str()) {
+        let _ = std::fs::remove_file(&file_path);
+        return Err(error);
+    }
+    Ok(file_path)
+}
+
 fn local_command(prompt: &str) -> Option<String> {
     let trimmed = prompt.trim();
     if let Some(command) = trimmed.strip_prefix('$') {
@@ -19,37 +94,67 @@ fn local_command(prompt: &str) -> Option<String> {
 }
 
 pub fn reconcile_interrupted_tools(messages: &mut Vec<Message>) {
-    let completed: std::collections::HashSet<String> = messages
+    let mut remaining = std::mem::take(messages).into_iter().peekable();
+    messages.reserve(remaining.len());
+    while let Some(message) = remaining.next() {
+        // Provider IDs can be reused by later assistant messages.
+        let mut following_results = Vec::new();
+        while remaining
+            .peek()
+            .is_some_and(|next| next.role == pi_agent_core::Role::Tool)
+        {
+            following_results.push(remaining.next().expect("peeked tool result"));
+        }
+        let interrupted = interrupted_tool_results(&message, &following_results);
+        messages.push(message);
+        messages.extend(interrupted);
+        messages.extend(following_results);
+    }
+}
+
+fn interrupted_tool_results(message: &Message, following_results: &[Message]) -> Vec<Message> {
+    let completed: std::collections::HashSet<&str> = following_results
         .iter()
-        .filter_map(|message| {
-            message
-                .tool_result
-                .as_ref()
-                .map(|result| result.tool_call_id.clone())
-        })
+        .filter_map(|message| message.tool_result.as_ref())
+        .map(|result| result.tool_call_id.as_str())
         .collect();
-    let mut reconciled = Vec::with_capacity(messages.len());
-    for message in messages.drain(..) {
-        let missing: Vec<_> = message
-            .tool_calls
-            .iter()
-            .flatten()
-            .filter(|call| !completed.contains(&call.id))
-            .cloned()
-            .collect();
-        reconciled.push(message);
-        for call in missing {
-            reconciled.push(Message::tool_result(
-                call.id,
-                call.name,
+    message
+        .tool_calls
+        .iter()
+        .flatten()
+        .filter(|call| !completed.contains(call.id.as_str()))
+        .map(|call| {
+            Message::tool_result(
+                call.id.clone(),
+                call.name.clone(),
                 "Execution interrupted; outcome unknown. Check workspace before retrying.",
                 true,
-            ));
-        }
-    }
-    *messages = reconciled;
+            )
+        })
+        .collect()
 }
 impl PiDesktopApp {
+    pub fn open_html_preview(&self, content: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let is_dark = self.theme_preference == ThemePreference::Dark;
+        let colors = if is_dark {
+            ThemeColors::dark()
+        } else {
+            ThemeColors::light()
+        };
+        match open_html_artifact(content, is_dark, &colors) {
+            Ok(_) => window.remove_notification::<HtmlPreviewNotice>(cx),
+            Err(error) => window.push_notification(
+                Notification::error(format!(
+                    "{}: {error}",
+                    self.tr("产物打开失败", "Could not open artifact")
+                ))
+                .id::<HtmlPreviewNotice>()
+                .autohide(false),
+                cx,
+            ),
+        }
+    }
+
     pub fn handle_generative_ui_action(
         &mut self,
         action: &crate::generative_ui::UiAction,
@@ -66,12 +171,11 @@ impl PiDesktopApp {
 
         // 2. If url is present, open in default browser
         if let Some(url) = &action.url {
-            #[cfg(target_os = "macos")]
-            let _ = std::process::Command::new("open").arg(url).spawn();
-            #[cfg(target_os = "windows")]
-            let _ = std::process::Command::new("cmd").args(["/c", "start", url]).spawn();
-            #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-            let _ = std::process::Command::new("xdg-open").arg(url).spawn();
+            if let Err(error) = open_external_url(url) {
+                self.run_error = Some(error.to_string());
+                self.status_message = self.tr("链接打开失败", "Could not open link").into();
+                cx.notify();
+            }
             return;
         }
 
@@ -79,10 +183,22 @@ impl PiDesktopApp {
         if let Some(payload) = &action.payload {
             if let Some(act) = payload.get("action").and_then(|v| v.as_str()) {
                 if act == "open_sidebar" {
-                    let id = payload.get("id").and_then(|v| v.as_str()).unwrap_or(&action.id);
-                    let title = payload.get("title").and_then(|v| v.as_str()).unwrap_or(&action.label);
-                    let kind = payload.get("kind").and_then(|v| v.as_str()).unwrap_or("code");
-                    let content = payload.get("content").and_then(|v| v.as_str()).unwrap_or("");
+                    let id = payload
+                        .get("id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or(&action.id);
+                    let title = payload
+                        .get("title")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or(&action.label);
+                    let kind = payload
+                        .get("kind")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("code");
+                    let content = payload
+                        .get("content")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
                     self.artifact_pane = Some(crate::ArtifactPaneState {
                         id: id.to_string(),
                         title: title.to_string(),
@@ -94,29 +210,12 @@ impl PiDesktopApp {
                     cx.notify();
                     return;
                 } else if act == "open_web_window" {
-                    let content = payload.get("content").and_then(|v| v.as_str()).unwrap_or("");
-                    let title = payload.get("title").and_then(|v| v.as_str()).unwrap_or("Artifact");
-                    let is_dark = self.theme_preference == crate::theme::ThemePreference::Dark;
-                    let colors = if is_dark {
-                        crate::theme::ThemeColors::dark()
-                    } else {
-                        crate::theme::ThemeColors::light()
-                    };
-                    let themed_html =
-                        crate::generative_ui::inject_theme_variables_to_html(content, is_dark, &colors);
-                    let temp_dir = std::env::temp_dir();
-                    let file_path = temp_dir.join(format!("volt_web_{}.html", action.id));
-                    if std::fs::write(&file_path, themed_html).is_ok() {
-                        #[cfg(target_os = "macos")]
-                        let _ = std::process::Command::new("open").arg(&file_path).spawn();
-                        #[cfg(target_os = "windows")]
-                        let _ = std::process::Command::new("cmd").args(["/c", "start", file_path.to_str().unwrap()]).spawn();
-                        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-                        let _ = std::process::Command::new("xdg-open").arg(&file_path).spawn();
-                        self.status_message = format!("已在独立 Web 视窗中运行【{}】", title);
-                        cx.notify();
-                        return;
-                    }
+                    let content = payload
+                        .get("content")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    self.open_html_preview(content, window, cx);
+                    return;
                 }
             }
         }
@@ -260,6 +359,10 @@ impl PiDesktopApp {
         self.show_settings = false;
         self.selected_nav = "chat";
         self.persist_active_session();
+        if !self.storage_error.is_empty() {
+            self.fail_unsaved_run(cx);
+            return;
+        }
         self.scroll_pinned = true;
         self.scroll.scroll_to_bottom();
         cx.notify();
@@ -284,6 +387,11 @@ impl PiDesktopApp {
             cx.notify();
         }
     }
+    fn fail_unsaved_run(&mut self, cx: &mut Context<Self>) {
+        self.run_error = Some(self.storage_error.clone());
+        self.finish_run(cx);
+    }
+
     fn start_local_command(&mut self, command: String, cx: &mut Context<Self>) {
         let agent = self.agent.clone();
         let generation = self.run_generation;
@@ -295,6 +403,20 @@ impl PiDesktopApp {
             arguments: serde_json::json!({"command":command}),
         }]);
         self.session.messages.push(call);
+        self.persist_active_session();
+        if !self.storage_error.is_empty() {
+            self.session.messages.push(Message::tool_result(
+                id,
+                "bash",
+                self.tr(
+                    "历史记录无法保存，命令未启动。",
+                    "History could not be saved. The command was not started.",
+                ),
+                true,
+            ));
+            self.fail_unsaved_run(cx);
+            return;
+        }
         let worker = self.runtime.spawn(async move {
             let start = std::time::Instant::now();
             let result = match agent.tools.get("bash") {
@@ -338,6 +460,7 @@ impl PiDesktopApp {
         let generation = self.run_generation;
         let mut messages = self.session.messages.clone();
         let (tx, mut rx) = tokio::sync::mpsc::channel(100);
+        let (checkpoint_tx, mut checkpoints) = tokio::sync::mpsc::channel(1);
         let model = ModelConfig {
             provider: "openai-compatible".into(),
             model: self.model_identifier.clone(),
@@ -346,7 +469,12 @@ impl PiDesktopApp {
             temperature: 0.2,
             max_tokens: Some(8192),
         };
-        let agent = PiAgent::new(self.workspace_dir.clone(), model);
+        let profile = match self.session.engine {
+            pi_agent_core::EngineKind::CodexCompatible => pi_agent_core::PolicyProfile::CodexStrict,
+            pi_agent_core::EngineKind::PiNative => self.preferences.policy_profile,
+        };
+        let mut agent = PiAgent::with_profile(self.workspace_dir.clone(), model, profile);
+        agent.tool_checkpoints = Some(checkpoint_tx);
         self.workflow_controls = agent.workflow_controls.clone();
         let worker = self.runtime.spawn(async move {
             let outcome = agent.run_turn(&mut messages, tx).await;
@@ -354,18 +482,48 @@ impl PiDesktopApp {
         });
         self.running = Some(worker.abort_handle());
         cx.spawn(async move |this, cx| {
-            while let Some(event) = rx.recv().await {
-                if this
-                    .update(cx, |this, cx| {
-                        if this.run_generation == generation {
-                            this.apply_agent_event(event, cx);
+            loop {
+                tokio::select! {
+                    Some(event) = rx.recv() => {
+                        if this.update(cx, |this, cx| {
+                            if this.run_generation == generation {
+                                this.apply_agent_event(event, cx);
+                            }
+                        }).is_err() {
+                            worker.abort();
+                            break;
                         }
-                    })
-                    .is_err()
-                {
-                    break;
+                    }
+                    Some(checkpoint) = checkpoints.recv() => {
+                        // The start event precedes this request; drain it and earlier results
+                        // so the saved history preserves their execution order.
+                        let mut pending_events = Vec::new();
+                        while let Ok(event) = rx.try_recv() {
+                            pending_events.push(event);
+                        }
+                        let saved = this.update(cx, |this, cx| {
+                            if this.run_generation != generation {
+                                anyhow::bail!("Run is no longer active");
+                            }
+                            for event in pending_events {
+                                this.apply_agent_event(event, cx);
+                            }
+                            if this.run_stopped {
+                                anyhow::bail!("Run was stopped");
+                            }
+                            this.persist_active_session();
+                            if !this.storage_error.is_empty() {
+                                anyhow::bail!("{}", this.storage_error);
+                            }
+                            Ok(())
+                        }).unwrap_or_else(Err);
+                        let _ = checkpoint.acknowledgement.send(saved);
+                    }
+                    else => break,
                 }
             }
+            drop(checkpoints);
+            drop(rx);
             let outcome = worker.await;
             let _ = this.update(cx, |this, cx| {
                 if this.run_generation != generation {
@@ -570,6 +728,16 @@ impl PiDesktopApp {
 mod tests {
     use super::{local_command, mask_api_key, Language};
 
+    fn pending_bash_call(id: &str) -> pi_agent_core::Message {
+        let mut message = pi_agent_core::Message::assistant("partial");
+        message.tool_calls = Some(vec![pi_agent_core::ToolCall {
+            id: id.into(),
+            name: "bash".into(),
+            arguments: serde_json::json!({}),
+        }]);
+        message
+    }
+
     #[test]
     fn local_command_dispatch_preserves_existing_routes() {
         assert_eq!(local_command("$ git status").as_deref(), Some("git status"));
@@ -618,6 +786,139 @@ mod tests {
     }
 
     #[test]
+    fn recovery_reused_tool_ids_do_not_hide_another_messages_pending_call() {
+        use super::*;
+        for (messages, missing_index, completed_index) in [
+            (
+                vec![
+                    pending_bash_call("reused"),
+                    Message::tool_result("reused", "bash", "actual output", false),
+                    pending_bash_call("reused"),
+                ],
+                3,
+                1,
+            ),
+            (
+                vec![
+                    pending_bash_call("reused"),
+                    pending_bash_call("reused"),
+                    Message::tool_result("reused", "bash", "actual output", false),
+                ],
+                1,
+                3,
+            ),
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("session.json");
+            let mut session = pi_agent_core::Session::new("reused-id", "Recovery fixture");
+            session.messages = messages;
+            session.save_to_file(&path).unwrap();
+            let mut restored = pi_agent_core::Session::load_from_file(&path).unwrap();
+
+            reconcile_interrupted_tools(&mut restored.messages);
+            assert_eq!(restored.messages.len(), 4);
+            let missing = restored.messages[missing_index]
+                .tool_result
+                .as_ref()
+                .unwrap();
+            assert_eq!(missing.tool_call_id, "reused");
+            assert!(missing.is_error);
+            assert!(missing.output.contains("outcome unknown"));
+            let completed = &restored.messages[completed_index];
+            assert_eq!(completed.content, "actual output");
+            assert!(!completed.tool_result.as_ref().unwrap().is_error);
+
+            let recovered = serde_json::to_value(&restored.messages).unwrap();
+            reconcile_interrupted_tools(&mut restored.messages);
+            assert_eq!(serde_json::to_value(&restored.messages).unwrap(), recovered);
+        }
+    }
+
+    #[test]
+    fn recovery_tool_results_do_not_cross_user_or_assistant_boundaries() {
+        use super::*;
+        for boundary in [
+            Message::user("next turn"),
+            Message::assistant("next response"),
+            Message::system("new context"),
+        ] {
+            let mut messages = vec![
+                pending_bash_call("reused"),
+                boundary,
+                Message::tool_result("reused", "bash", "later output", false),
+            ];
+            reconcile_interrupted_tools(&mut messages);
+            assert_eq!(messages.len(), 4);
+            assert!(messages[1].tool_result.as_ref().unwrap().is_error);
+            assert_eq!(messages[3].content, "later output");
+        }
+    }
+
+    #[test]
+    fn recovery_preserves_out_of_order_results_and_missing_call_order() {
+        use super::*;
+        let mut assistant = pending_bash_call("a");
+        assistant.tool_calls = Some(
+            ["a", "b", "c", "d"]
+                .into_iter()
+                .map(|id| pi_agent_core::ToolCall {
+                    id: id.into(),
+                    name: "bash".into(),
+                    arguments: serde_json::json!({}),
+                })
+                .collect(),
+        );
+        let mut messages = vec![
+            assistant,
+            Message::tool_result("b", "bash", "output b", false),
+            Message::tool_result("a", "bash", "output a", false),
+        ];
+        reconcile_interrupted_tools(&mut messages);
+        let results: Vec<_> = messages
+            .iter()
+            .filter_map(|message| message.tool_result.as_ref())
+            .map(|result| (result.tool_call_id.as_str(), result.is_error))
+            .collect();
+        assert_eq!(
+            results,
+            [("c", true), ("d", true), ("b", false), ("a", false)]
+        );
+        assert_eq!(messages[3].content, "output b");
+        assert_eq!(messages[4].content, "output a");
+    }
+
+    #[test]
+    fn recovery_preserves_empty_history_and_unpaired_tool_records() {
+        use super::*;
+        let mut empty = Vec::new();
+        reconcile_interrupted_tools(&mut empty);
+        assert!(empty.is_empty());
+
+        let orphan = Message::tool_result("reused", "bash", "earlier output", false);
+        let mut incomplete = Message::tool_result("incomplete", "bash", "partial output", false);
+        incomplete.tool_result = None;
+        let expected_orphan = serde_json::to_value(&orphan).unwrap();
+        let expected_incomplete = serde_json::to_value(&incomplete).unwrap();
+        let mut messages = vec![
+            orphan,
+            Message::system("restored context"),
+            pending_bash_call("reused"),
+            incomplete,
+        ];
+        reconcile_interrupted_tools(&mut messages);
+        assert_eq!(messages.len(), 5);
+        assert_eq!(serde_json::to_value(&messages[0]).unwrap(), expected_orphan);
+        assert!(messages[3].tool_result.as_ref().unwrap().is_error);
+        assert_eq!(
+            serde_json::to_value(&messages[4]).unwrap(),
+            expected_incomplete
+        );
+        let recovered = serde_json::to_value(&messages).unwrap();
+        reconcile_interrupted_tools(&mut messages);
+        assert_eq!(serde_json::to_value(&messages).unwrap(), recovered);
+    }
+
+    #[test]
     fn masks_long_short_and_unicode_credentials() {
         for key in [
             "dummy-test-credential",
@@ -630,5 +931,50 @@ mod tests {
             assert!(masked.contains("••••"));
         }
         assert_eq!(mask_api_key("", Language::English), "Not configured");
+    }
+
+    #[test]
+    fn browser_links_only_allow_http_without_credentials() {
+        for url in [
+            "javascript:alert(1)",
+            "file:///tmp/widget.html",
+            "data:text/html,test",
+            "https://user:pass@example.com",
+            "https://user@example.com",
+            "--help",
+        ] {
+            assert!(super::external_http_url(url).is_err(), "{url}");
+        }
+        let parsed = super::external_http_url("HTTPS://EXAMPLE.COM/hello world?q=a&b=c").unwrap();
+        assert_eq!(parsed.as_str(), "https://example.com/hello%20world?q=a&b=c");
+    }
+
+    #[test]
+    fn artifact_creation_never_overwrites_existing_files() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("widget.html");
+        super::write_artifact_file(&path, "original").unwrap();
+        assert!(super::write_artifact_file(&path, "replacement").is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "original");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn artifact_creation_rejects_existing_symlinks() {
+        let directory = tempfile::tempdir().unwrap();
+        let destination = directory.path().join("original.html");
+        let link = directory.path().join("widget.html");
+        std::fs::write(&destination, "original").unwrap();
+        std::os::unix::fs::symlink(&destination, &link).unwrap();
+        assert!(super::write_artifact_file(&link, "replacement").is_err());
+        assert_eq!(std::fs::read_to_string(destination).unwrap(), "original");
     }
 }

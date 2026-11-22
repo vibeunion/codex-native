@@ -1,5 +1,57 @@
 use serde::{Deserialize, Serialize};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EngineKind {
+    CodexCompatible,
+    PiNative,
+}
+
+impl EngineKind {
+    pub const fn compiled_default() -> Self {
+        #[cfg(all(feature = "pi-native", not(feature = "codex-harness")))]
+        {
+            Self::PiNative
+        }
+        #[cfg(not(all(feature = "pi-native", not(feature = "codex-harness"))))]
+        {
+            Self::CodexCompatible
+        }
+    }
+
+    pub const fn is_compiled(self) -> bool {
+        match self {
+            Self::CodexCompatible => cfg!(feature = "codex-harness"),
+            Self::PiNative => cfg!(feature = "pi-native"),
+        }
+    }
+}
+
+impl Default for EngineKind {
+    fn default() -> Self {
+        Self::compiled_default()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionSource {
+    Local,
+    CodexDesktop,
+    CodexHarness,
+    Pi,
+    Imported,
+}
+
+impl Default for SessionSource {
+    fn default() -> Self {
+        match EngineKind::default() {
+            EngineKind::CodexCompatible => Self::CodexHarness,
+            EngineKind::PiNative => Self::Pi,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Role {

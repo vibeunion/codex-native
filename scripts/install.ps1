@@ -1,8 +1,8 @@
 <#
 .SYNOPSIS
-    Volt Desktop (Native AI Coding Assistant) Windows One-Click Installer
+    Native desktop AI coding assistant Windows One-Click Installer
 .DESCRIPTION
-    Installs Volt into %LOCALAPPDATA%\Programs\Volt, creates Desktop and Start Menu shortcuts,
+    Installs the configured application into %LOCALAPPDATA%\Programs, creates Desktop and Start Menu shortcuts,
     configures user PATH, and registers the uninstaller into Windows Add/Remove Programs.
     No Administrator (UAC) permissions required!
 .EXAMPLE
@@ -16,19 +16,20 @@ param(
     [switch]$NoStartMenuShortcut = $false,
     [switch]$NoPath = $false,
     [switch]$NoLaunch = $false,
+    [switch]$RegisterAgentConfig = $false,
     [string]$LocalExePath = ""
 )
 
 $ErrorActionPreference = "Stop"
+$AppName = if ([string]::IsNullOrWhiteSpace($env:APP_BRAND_NAME)) { "Codex Native" } else { $env:APP_BRAND_NAME.Trim() }
 
 Write-Host ""
 Write-Host "========================================================" -ForegroundColor Cyan
-Write-Host "      Volt Native AI Coding Assistant - Windows 安装     " -ForegroundColor Cyan
+Write-Host "      $AppName Native AI Coding Assistant - Windows 安装     " -ForegroundColor Cyan
 Write-Host "========================================================" -ForegroundColor Cyan
 Write-Host ""
 
 # 1. Determine Target Installation Path
-$AppName = "Volt"
 $InstallDir = Join-Path $env:LOCALAPPDATA "Programs\$AppName"
 $TargetExe = Join-Path $InstallDir "volt.exe"
 
@@ -87,7 +88,7 @@ if (-not (Test-Path $InstallDir)) {
     New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
 }
 
-Write-Host ">> 正在部署 volt.exe 到系统用户程序库..." -ForegroundColor Cyan
+Write-Host ">> 正在部署 $AppName 到系统用户程序库..." -ForegroundColor Cyan
 if ([IO.Path]::GetFullPath($SourceExe) -ine [IO.Path]::GetFullPath($TargetExe)) {
     Copy-Item -LiteralPath $SourceExe -Destination $TargetExe -Force
 }
@@ -102,7 +103,7 @@ if (-not $NoDesktopShortcut) {
     $Shortcut = $WshShell.CreateShortcut($ShortcutFile)
     $Shortcut.TargetPath = $TargetExe
     $Shortcut.WorkingDirectory = $InstallDir
-    $Shortcut.Description = "Volt Native AI Coding Assistant"
+    $Shortcut.Description = "$AppName Native AI Coding Assistant"
     $Shortcut.Save()
 }
 
@@ -116,7 +117,7 @@ if (-not $NoStartMenuShortcut) {
     $Shortcut = $WshShell.CreateShortcut($StartMenuFile)
     $Shortcut.TargetPath = $TargetExe
     $Shortcut.WorkingDirectory = $InstallDir
-    $Shortcut.Description = "Volt Native AI Coding Assistant"
+    $Shortcut.Description = "$AppName Native AI Coding Assistant"
     $Shortcut.Save()
 }
 
@@ -142,7 +143,7 @@ if (-not $NoPath) {
         $result = [System.UIntPtr]::Zero
         [Win32.Env]::SendMessageTimeout([System.IntPtr]0xffff, 0x001A, [System.UIntPtr]::Zero, "Environment", 2, 5000, [ref]$result) | Out-Null
     } else {
-        Write-Host ">> 用户 PATH 中已存在 Volt，跳过添加。" -ForegroundColor Gray
+        Write-Host ">> 用户 PATH 中已存在 $AppName，跳过添加。" -ForegroundColor Gray
     }
 }
 
@@ -153,18 +154,24 @@ if (-not (Test-Path $UninstallKey)) {
     New-Item -Path $UninstallKey -Force | Out-Null
 }
 
-Set-ItemProperty -Path $UninstallKey -Name "DisplayName" -Value "Volt Desktop (Native AI Coding Assistant)"
+Set-ItemProperty -Path $UninstallKey -Name "DisplayName" -Value "$AppName (Native AI Coding Assistant)"
 Set-ItemProperty -Path $UninstallKey -Name "DisplayVersion" -Value "0.1.0"
-Set-ItemProperty -Path $UninstallKey -Name "Publisher" -Value "Volt Team"
+Set-ItemProperty -Path $UninstallKey -Name "Publisher" -Value "$AppName Team"
 Set-ItemProperty -Path $UninstallKey -Name "DisplayIcon" -Value "$TargetExe,0"
 Set-ItemProperty -Path $UninstallKey -Name "InstallLocation" -Value $InstallDir
 Set-ItemProperty -Path $UninstallKey -Name "UninstallString" -Value "`"$TargetExe`" --uninstall"
 Set-ItemProperty -Path $UninstallKey -Name "NoModify" -Value 1 -Type DWord
 Set-ItemProperty -Path $UninstallKey -Name "NoRepair" -Value 1 -Type DWord
 
+if ($RegisterAgentConfig) {
+    # Explicit opt-in may replace a different client's association.
+    & $TargetExe --register-agentconfig
+    if ($LASTEXITCODE -ne 0) { throw "AgentConfig protocol registration failed" }
+}
+
 Write-Host ""
 Write-Host "========================================================" -ForegroundColor Green
-Write-Host "  ✓ Volt Windows 自安装已全部就绪！                     " -ForegroundColor Green
+Write-Host "  ✓ $AppName Windows 自安装已全部就绪！                     " -ForegroundColor Green
 Write-Host "========================================================" -ForegroundColor Green
 if (-not $NoDesktopShortcut) { Write-Host "· 桌面快捷方式: 已生成" -ForegroundColor White }
 if (-not $NoStartMenuShortcut) { Write-Host "· 开始菜单快捷方式已生成" -ForegroundColor White }
@@ -173,7 +180,7 @@ Write-Host ""
 
 # 8. Auto-Launch Application
 if (-not $NoLaunch) {
-    Write-Host ">> 正在启动 Volt..." -ForegroundColor Cyan
+    Write-Host ">> 正在启动 $AppName..." -ForegroundColor Cyan
     Start-Process -FilePath $TargetExe
 }
 

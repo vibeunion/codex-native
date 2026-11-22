@@ -1,6 +1,32 @@
 use anyhow::{bail, Context, Result};
-use std::{path::Path, time::Duration};
-use tokio::process::Command;
+use std::{path::Path, process::Stdio, time::Duration};
+use tokio::{
+    io::{AsyncRead, AsyncReadExt},
+    process::Command,
+};
+
+const PREVIEW_LIMIT: usize = 1_048_576;
+const GIT_LIST_LIMIT: usize = 16 * PREVIEW_LIMIT;
+const GIT_STDERR_LIMIT: usize = 64 * 1024;
+const BINARY_PREVIEW: &str = "Binary file; text preview unavailable.";
+
+#[cfg(test)]
+fn git_timeout() -> Duration {
+    // The unit-test harness runs hundreds of tests concurrently, so process
+    // startup can be delayed by the harness without reflecting app behavior.
+    Duration::from_secs(60)
+}
+
+#[cfg(not(test))]
+fn git_timeout() -> Duration {
+    Duration::from_secs(15)
+}
+
+struct CapturedOutput {
+    bytes: Vec<u8>,
+    truncated: bool,
+    contains_nul: bool,
+}
 
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
 pub enum ReviewMode {
@@ -48,22 +74,74 @@ pub fn workspace_relative_path(workspace: &Path, file: &str) -> Option<String> {
 }
 
 async fn git(workspace: &Path, args: &[&str]) -> Result<Vec<u8>> {
-    let output = tokio::time::timeout(
-        Duration::from_secs(15),
-        Command::new("git")
+    let output = git_output(workspace, args, GIT_LIST_LIMIT).await?;
+    if output.truncated {
+        bail!("Git output exceeds 16 MiB");
+    }
+    Ok(output.bytes)
+}
+
+async fn capture_prefix(
+    mut reader: impl AsyncRead + Unpin,
+    limit: usize,
+) -> std::io::Result<CapturedOutput> {
+    let mut bytes = Vec::with_capacity(limit.min(8192));
+    let mut truncated = false;
+    let mut contains_nul = false;
+    let mut buffer = [0; 8192];
+    loop {
+        let count = reader.read(&mut buffer).await?;
+        if count == 0 {
+            break;
+        }
+        let retained = count.min(limit - bytes.len());
+        bytes.extend_from_slice(&buffer[..retained]);
+        truncated |= retained < count;
+        contains_nul |= buffer[..count].contains(&0);
+    }
+    Ok(CapturedOutput {
+        bytes,
+        truncated,
+        contains_nul,
+    })
+}
+
+async fn git_output(
+    workspace: &Path,
+    args: &[&str],
+    stdout_limit: usize,
+) -> Result<CapturedOutput> {
+    tokio::time::timeout(git_timeout(), async {
+        let mut child = Command::new("git")
             .args(["--no-pager", "-c", "color.ui=false"])
             .args(args)
             .current_dir(workspace)
             .env("GIT_OPTIONAL_LOCKS", "0")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
             .kill_on_drop(true)
-            .output(),
-    )
+            .spawn()
+            .context("Git could not be started")?;
+        let stdout = child.stdout.take().context("Git stdout unavailable")?;
+        let stderr = child.stderr.take().context("Git stderr unavailable")?;
+        let (stdout, stderr, status) = tokio::try_join!(
+            capture_prefix(stdout, stdout_limit),
+            capture_prefix(stderr, GIT_STDERR_LIMIT),
+            child.wait(),
+        )
+        .context("Git process output unavailable")?;
+        if !status.success() {
+            let mut diagnostic = String::from_utf8_lossy(&stderr.bytes).into_owned();
+            if stderr.truncated {
+                diagnostic.push_str("\n[Git diagnostics truncated at 64 KiB]");
+            }
+            bail!("Git exited with {status}: {}", diagnostic.trim());
+        }
+        Ok(stdout)
+    })
     .await
-    .context("Git timed out; refresh to retry")??;
-    if !output.status.success() {
-        bail!("{}", String::from_utf8_lossy(&output.stderr));
-    }
-    Ok(output.stdout)
+    .context("Git timed out; refresh to retry")?
 }
 pub async fn snapshot(
     workspace: &Path,
@@ -112,7 +190,12 @@ pub async fn snapshot(
                 args.push("--cached");
             }
             args.extend(["--", path]);
-            preview(git(workspace, &args).await?)
+            let output = git_output(workspace, &args, PREVIEW_LIMIT + 1).await?;
+            if output.contains_nul {
+                BINARY_PREVIEW.into()
+            } else {
+                preview(output.bytes)
+            }
         }
     } else {
         String::new()
@@ -136,22 +219,30 @@ async fn untracked_preview(workspace: &Path, full: &Path) -> Result<String> {
     let metadata = tokio::fs::metadata(&canonical)
         .await
         .context("file metadata unavailable")?;
-    if !metadata.is_file() || metadata.len() > 1_048_576 {
+    if !metadata.is_file() || metadata.len() > PREVIEW_LIMIT as u64 {
         bail!("not a regular file or larger than 1 MiB");
     }
-    Ok(preview(
-        tokio::fs::read(canonical)
-            .await
-            .context("file cannot be read")?,
-    ))
+    let file = tokio::fs::File::open(canonical)
+        .await
+        .context("file cannot be read")?;
+    read_file_preview(file).await
+}
+
+async fn read_file_preview(file: tokio::fs::File) -> Result<String> {
+    let mut bytes = Vec::new();
+    file.take(PREVIEW_LIMIT as u64 + 1)
+        .read_to_end(&mut bytes)
+        .await
+        .context("file cannot be read")?;
+    Ok(preview(bytes))
 }
 
 fn preview(mut bytes: Vec<u8>) -> String {
     if bytes.contains(&0) {
-        return "Binary file; text preview unavailable.".into();
+        return BINARY_PREVIEW.into();
     }
-    let truncated = bytes.len() > 1_048_576;
-    bytes.truncate(1_048_576);
+    let truncated = bytes.len() > PREVIEW_LIMIT;
+    bytes.truncate(PREVIEW_LIMIT);
     let mut text = String::from_utf8_lossy(&bytes).into_owned();
     if truncated {
         text.push_str("\n[Preview truncated at 1 MiB]");
@@ -161,6 +252,103 @@ fn preview(mut bytes: Vec<u8>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn oversized_git_output_is_rejected_instead_of_retained() {
+        let directory = tempfile::tempdir().unwrap();
+        let workspace = directory.path();
+        git(workspace, &["init", "-q"]).await.unwrap();
+        tokio::fs::write(
+            workspace.join("oversized.txt"),
+            vec![b'x'; 16 * 1_048_576 + 1],
+        )
+        .await
+        .unwrap();
+        git(workspace, &["add", "--", "oversized.txt"])
+            .await
+            .unwrap();
+        match git(workspace, &["show", ":oversized.txt"]).await {
+            Ok(bytes) => panic!(
+                "retained {} bytes instead of rejecting the output",
+                bytes.len()
+            ),
+            Err(error) => assert!(
+                error.to_string().contains("Git output exceeds 16 MiB"),
+                "{error:#}"
+            ),
+        }
+    }
+
+    #[tokio::test]
+    async fn large_git_diff_drains_output_and_keeps_only_the_preview_prefix() {
+        let directory = tempfile::tempdir().unwrap();
+        let workspace = directory.path();
+        git(workspace, &["init", "-q"]).await.unwrap();
+        let path = workspace.join("large.txt");
+        tokio::fs::write(&path, vec![b'a'; PREVIEW_LIMIT + 4096])
+            .await
+            .unwrap();
+        git(workspace, &["add", "--", "large.txt"]).await.unwrap();
+        tokio::fs::write(&path, vec![b'b'; PREVIEW_LIMIT + 4096])
+            .await
+            .unwrap();
+        let output = git_output(
+            workspace,
+            &["diff", "--no-ext-diff", "--no-textconv", "--", "large.txt"],
+            PREVIEW_LIMIT + 1,
+        )
+        .await
+        .unwrap();
+        assert_eq!(output.bytes.len(), PREVIEW_LIMIT + 1);
+        assert!(output.truncated);
+        let snapshot = snapshot(workspace, ReviewMode::Unstaged, None)
+            .await
+            .unwrap();
+        assert_eq!(snapshot.files, vec!["large.txt"]);
+        assert_eq!(snapshot.selected.as_deref(), Some("large.txt"));
+        assert!(snapshot.diff.ends_with("[Preview truncated at 1 MiB]"));
+        assert!(snapshot.diff.len() < PREVIEW_LIMIT + 64);
+    }
+
+    #[tokio::test]
+    async fn late_nul_in_git_output_retains_the_binary_preview_classification() {
+        let directory = tempfile::tempdir().unwrap();
+        let workspace = directory.path();
+        git(workspace, &["init", "-q"]).await.unwrap();
+        let path = workspace.join("late-binary.dat");
+        tokio::fs::write(&path, b"before\n").await.unwrap();
+        git(workspace, &["add", "--", "late-binary.dat"])
+            .await
+            .unwrap();
+        let mut contents = vec![b'x'; PREVIEW_LIMIT + 4096];
+        contents.push(0);
+        contents.extend_from_slice(b"tail\n");
+        tokio::fs::write(&path, contents).await.unwrap();
+        let snapshot = snapshot(workspace, ReviewMode::Unstaged, None)
+            .await
+            .unwrap();
+        assert!(
+            snapshot.diff == "Binary file; text preview unavailable.",
+            "late NUL was omitted from classification (preview has {} bytes)",
+            snapshot.diff.len()
+        );
+    }
+
+    #[tokio::test]
+    async fn file_growth_after_metadata_check_cannot_expand_the_preview_read() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("growing.txt");
+        tokio::fs::write(&path, b"small").await.unwrap();
+        let file = tokio::fs::File::open(&path).await.unwrap();
+        assert!(file.metadata().await.unwrap().len() < PREVIEW_LIMIT as u64);
+        tokio::fs::write(&path, vec![b'x'; PREVIEW_LIMIT + 4096])
+            .await
+            .unwrap();
+        let text = read_file_preview(file).await.unwrap();
+        assert!(text.starts_with("xxxx"));
+        assert!(text.ends_with("[Preview truncated at 1 MiB]"));
+        assert!(text.len() < PREVIEW_LIMIT + 64);
+    }
+
     #[tokio::test]
     async fn reads_staged_unstaged_and_preserves_list_on_preview_failure() {
         let directory = tempfile::tempdir().unwrap();

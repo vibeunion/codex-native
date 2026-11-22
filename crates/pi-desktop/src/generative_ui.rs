@@ -4,6 +4,13 @@ use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants};
 use gpui_kit::gpui::*;
 use gpui_kit::prelude::FluentBuilder;
 use serde::{Deserialize, Serialize};
+use std::path::Path;
+
+pub const MAX_ARTIFACT_BYTES: usize = 256 * 1024;
+const MAX_UI_TEXT_BYTES: usize = 16 * 1024;
+const MAX_UI_COLLECTION_ITEMS: usize = 256;
+const MAX_UI_NODE_DEPTH: usize = 32;
+const MAX_UI_NODE_COUNT: usize = 512;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -350,257 +357,567 @@ pub struct UiAction {
 #[derive(Debug, Clone, PartialEq)]
 pub enum ContentSegment {
     Markdown(String),
-    GenerativeUi(UiNode),
+    GenerativeUi(Box<UiNode>),
 }
 
 /// Parses message text containing optional ```json-ui, ```ui, ```generative-ui,
 /// ```adaptive-card, ```html:artifact, or <agent-embed> blocks into a sequence of Markdown text and native UI nodes.
+#[cfg(test)]
 pub fn parse_message_segments(text: &str) -> Vec<ContentSegment> {
+    parse_message_segments_internal(text, None)
+}
+
+pub fn parse_message_segments_with_workspace(
+    text: &str,
+    workspace_dir: &Path,
+) -> Vec<ContentSegment> {
+    parse_message_segments_internal(text, Some(workspace_dir))
+}
+
+fn parse_message_segments_internal(
+    text: &str,
+    workspace_dir: Option<&Path>,
+) -> Vec<ContentSegment> {
     let mut segments = Vec::new();
-    let mut current_offset = 0;
+    let mut markdown_start = 0;
+    let mut search_offset = 0;
 
-    let json_markers = [
-        "```json-ui",
-        "```ui",
-        "```generative-ui",
-        "```adaptive-card",
-    ];
-
-    let html_markers = [
-        "```html:artifact",
-        "```artifact:html",
-        "```html:embed",
-    ];
-
-    while current_offset < text.len() {
-        let remaining = &text[current_offset..];
-        let lower = remaining.to_lowercase();
-
-        let mut earliest_json: Option<(usize, &str)> = None;
-        for marker in &json_markers {
-            if let Some(pos) = lower.find(marker) {
-                match earliest_json {
-                    None => earliest_json = Some((pos, marker)),
-                    Some((p, _)) if pos < p => earliest_json = Some((pos, marker)),
-                    _ => {}
-                }
+    while let Some((relative_start, marker)) = next_message_marker(&text[search_offset..]) {
+        let block_start = search_offset + relative_start;
+        let Some(block) = parse_message_block(&text[block_start..], marker, workspace_dir) else {
+            search_offset = block_start + marker.text.len();
+            continue;
+        };
+        search_offset = block_start + block.length;
+        if let Some(mut node) = block.node.filter(is_safe_ui_node) {
+            if block_start > markdown_start {
+                segments.push(ContentSegment::Markdown(
+                    text[markdown_start..block_start].to_string(),
+                ));
             }
-        }
-
-        let mut earliest_html_block: Option<(usize, &str)> = None;
-        for marker in &html_markers {
-            if let Some(pos) = lower.find(marker) {
-                match earliest_html_block {
-                    None => earliest_html_block = Some((pos, marker)),
-                    Some((p, _)) if pos < p => earliest_html_block = Some((pos, marker)),
-                    _ => {}
-                }
-            }
-        }
-
-        let agent_embed_pos = lower.find("<agent-embed");
-
-        enum MatchKind<'a> {
-            Json(&'a str),
-            HtmlBlock(&'a str),
-            AgentEmbed,
-        }
-
-        let mut earliest: Option<(usize, MatchKind)> = None;
-
-        if let Some((pos, marker)) = earliest_json {
-            earliest = Some((pos, MatchKind::Json(marker)));
-        }
-
-        if let Some((pos, marker)) = earliest_html_block {
-            match earliest {
-                None => earliest = Some((pos, MatchKind::HtmlBlock(marker))),
-                Some((p, _)) if pos < p => earliest = Some((pos, MatchKind::HtmlBlock(marker))),
-                _ => {}
-            }
-        }
-
-        if let Some(pos) = agent_embed_pos {
-            match earliest {
-                None => earliest = Some((pos, MatchKind::AgentEmbed)),
-                Some((p, _)) if pos < p => earliest = Some((pos, MatchKind::AgentEmbed)),
-                _ => {}
-            }
-        }
-
-        match earliest {
-            Some((start_rel, MatchKind::Json(marker))) => {
-                let block_start = current_offset + start_rel;
-                let content_start = block_start + marker.len();
-
-                if let Some(end_rel) = text[content_start..].find("```") {
-                    let content_end = content_start + end_rel;
-                    let json_candidate = text[content_start..content_end].trim();
-
-                    match serde_json::from_str::<UiNode>(json_candidate) {
-                        Ok(node) => {
-                            if block_start > current_offset {
-                                segments.push(ContentSegment::Markdown(
-                                    text[current_offset..block_start].to_string(),
-                                ));
-                            }
-                            segments.push(ContentSegment::GenerativeUi(node));
-                            current_offset = content_end + 3;
-                            continue;
-                        }
-                        Err(_) => {
-                            let next_offset = block_start + marker.len();
-                            if next_offset > current_offset {
-                                current_offset = next_offset;
-                                continue;
-                            }
-                        }
-                    }
-                }
-            }
-            Some((start_rel, MatchKind::HtmlBlock(marker))) => {
-                let block_start = current_offset + start_rel;
-                let after_marker = block_start + marker.len();
-                let line_end = text[after_marker..]
-                    .find('\n')
-                    .map(|p| after_marker + p)
-                    .unwrap_or(after_marker);
-                let fence_params = text[after_marker..line_end].trim();
-                let content_start = if line_end < text.len() {
-                    line_end + 1
-                } else {
-                    line_end
-                };
-
-                if let Some(end_rel) = text[content_start..].find("```") {
-                    let content_end = content_start + end_rel;
-                    let html_content = text[content_start..content_end].trim().to_string();
-
-                    let title = if let Some(t_idx) = fence_params.find("title=\"") {
-                        let rest = &fence_params[t_idx + 7..];
-                        rest.split('"').next().map(|s| s.to_string())
+            if !matches!(marker.kind, MessageBlockKind::Json) {
+                if let UiNode::Artifact { id, .. } = &mut node {
+                    let prefix = if matches!(marker.kind, MessageBlockKind::Embed) {
+                        "embed"
                     } else {
-                        None
-                    }
-                    .unwrap_or_else(|| "HTML 交互产物 (Interactive Artifact)".to_string());
-
-                    let id = format!("artifact_{}", block_start);
-
-                    if block_start > current_offset {
-                        segments.push(ContentSegment::Markdown(
-                            text[current_offset..block_start].to_string(),
-                        ));
-                    }
-                    segments.push(ContentSegment::GenerativeUi(UiNode::Artifact {
-                        id,
-                        title,
-                        kind: "html".to_string(),
-                        content: html_content,
-                    }));
-                    current_offset = content_end + 3;
-                    continue;
+                        "artifact"
+                    };
+                    *id = format!("{prefix}_{block_start}");
                 }
             }
-            Some((start_rel, MatchKind::AgentEmbed)) => {
-                let block_start = current_offset + start_rel;
-                let rest_from_tag = &text[block_start..];
-
-                if let Some(close_tag_idx) = rest_from_tag.to_lowercase().find("</agent-embed>") {
-                    let end_of_close = block_start + close_tag_idx + "</agent-embed>".len();
-                    let inner_start_rel = rest_from_tag
-                        .find('>')
-                        .map(|p| p + 1)
-                        .unwrap_or(rest_from_tag.len());
-                    let inner_content = &rest_from_tag[inner_start_rel..close_tag_idx];
-
-                    let tag_header = &rest_from_tag[..inner_start_rel];
-                    let mut content = inner_content.trim().to_string();
-
-                    if let Some(src_pos) = tag_header.find("src=\"") {
-                        let after_src = &tag_header[src_pos + 5..];
-                        if let Some(quote_end) = after_src.find('"') {
-                            let src_path = &after_src[..quote_end];
-                            let path_clean = src_path.strip_prefix("file://").unwrap_or(src_path);
-                            if let Ok(file_content) = std::fs::read_to_string(path_clean) {
-                                content = file_content;
-                            } else if content.is_empty() {
-                                content = format!("<p>Embedded file: {}</p>", src_path);
-                            }
-                        }
-                    }
-
-                    let title = if let Some(t_idx) = tag_header.find("title=\"") {
-                        let rest = &tag_header[t_idx + 7..];
-                        rest.split('"').next().map(|s| s.to_string())
-                    } else {
-                        None
-                    }
-                    .unwrap_or_else(|| "交互组件 (Interactive Widget)".to_string());
-
-                    if block_start > current_offset {
-                        segments.push(ContentSegment::Markdown(
-                            text[current_offset..block_start].to_string(),
-                        ));
-                    }
-                    segments.push(ContentSegment::GenerativeUi(UiNode::Artifact {
-                        id: format!("embed_{}", block_start),
-                        title,
-                        kind: "html".to_string(),
-                        content,
-                    }));
-                    current_offset = end_of_close;
-                    continue;
-                } else if let Some(self_close_idx) = rest_from_tag.find("/>") {
-                    let end_of_tag = block_start + self_close_idx + 2;
-                    let tag_header = &rest_from_tag[..self_close_idx];
-                    let mut content = String::new();
-
-                    if let Some(src_pos) = tag_header.find("src=\"") {
-                        let after_src = &tag_header[src_pos + 5..];
-                        if let Some(quote_end) = after_src.find('"') {
-                            let src_path = &after_src[..quote_end];
-                            let path_clean = src_path.strip_prefix("file://").unwrap_or(src_path);
-                            if let Ok(file_content) = std::fs::read_to_string(path_clean) {
-                                content = file_content;
-                            } else {
-                                content = format!("<p>Embedded file: {}</p>", src_path);
-                            }
-                        }
-                    }
-
-                    let title = if let Some(t_idx) = tag_header.find("title=\"") {
-                        let rest = &tag_header[t_idx + 7..];
-                        rest.split('"').next().map(|s| s.to_string())
-                    } else {
-                        None
-                    }
-                    .unwrap_or_else(|| "交互组件 (Interactive Widget)".to_string());
-
-                    if block_start > current_offset {
-                        segments.push(ContentSegment::Markdown(
-                            text[current_offset..block_start].to_string(),
-                        ));
-                    }
-                    segments.push(ContentSegment::GenerativeUi(UiNode::Artifact {
-                        id: format!("embed_{}", block_start),
-                        title,
-                        kind: "html".to_string(),
-                        content,
-                    }));
-                    current_offset = end_of_tag;
-                    continue;
-                }
-            }
-            None => {}
+            segments.push(ContentSegment::GenerativeUi(Box::new(node)));
+            markdown_start = search_offset;
         }
-
-        if current_offset < text.len() {
-            segments.push(ContentSegment::Markdown(text[current_offset..].to_string()));
-        }
-        break;
     }
-
+    if markdown_start < text.len() {
+        segments.push(ContentSegment::Markdown(text[markdown_start..].to_string()));
+    }
     segments
+}
+
+#[derive(Clone, Copy)]
+enum MessageBlockKind {
+    Json,
+    Html,
+    Embed,
+}
+
+#[derive(Clone, Copy)]
+struct MessageMarker {
+    text: &'static str,
+    kind: MessageBlockKind,
+}
+
+struct ParsedMessageBlock {
+    length: usize,
+    node: Option<UiNode>,
+}
+
+fn next_message_marker(text: &str) -> Option<(usize, MessageMarker)> {
+    use MessageBlockKind::{Embed, Html, Json};
+    [
+        ("```json-ui", Json),
+        ("```ui", Json),
+        ("```generative-ui", Json),
+        ("```adaptive-card", Json),
+        ("```html:artifact", Html),
+        ("```artifact:html", Html),
+        ("```html:embed", Html),
+        ("<agent-embed", Embed),
+    ]
+    .into_iter()
+    .filter_map(|(token, kind)| {
+        find_ascii_case_insensitive(text, token)
+            .map(|start| (start, MessageMarker { text: token, kind }))
+    })
+    .min_by_key(|(start, _)| *start)
+}
+
+fn parse_message_block(
+    block: &str,
+    marker: MessageMarker,
+    workspace_dir: Option<&Path>,
+) -> Option<ParsedMessageBlock> {
+    match marker.kind {
+        MessageBlockKind::Json => parse_json_block(block, marker.text.len()),
+        MessageBlockKind::Html => parse_html_block(block, marker.text.len()),
+        MessageBlockKind::Embed => parse_embed_block(block, workspace_dir),
+    }
+}
+
+fn parse_json_block(block: &str, marker_length: usize) -> Option<ParsedMessageBlock> {
+    let content_end = marker_length + block[marker_length..].find("```")?;
+    let candidate = block[marker_length..content_end].trim();
+    let node = if candidate.len() <= MAX_ARTIFACT_BYTES {
+        serde_json::from_str(candidate).ok()
+    } else {
+        None
+    };
+    Some(ParsedMessageBlock {
+        length: content_end + 3,
+        node,
+    })
+}
+
+fn parse_html_block(block: &str, marker_length: usize) -> Option<ParsedMessageBlock> {
+    let line_end = marker_length + block[marker_length..].find('\n')?;
+    let content_start = line_end + 1;
+    let content_end = content_start + block[content_start..].find("```")?;
+    let content = block[content_start..content_end].trim();
+    let node = (content.len() <= MAX_ARTIFACT_BYTES).then(|| UiNode::Artifact {
+        id: String::new(),
+        title: attribute_value(&block[marker_length..line_end], "title")
+            .unwrap_or_else(|| "HTML 交互产物 (Interactive Artifact)".to_string()),
+        kind: "html".to_string(),
+        content: content.to_string(),
+    });
+    Some(ParsedMessageBlock {
+        length: content_end + 3,
+        node,
+    })
+}
+
+fn parse_embed_block(block: &str, workspace_dir: Option<&Path>) -> Option<ParsedMessageBlock> {
+    let after_marker = &block["<agent-embed".len()..];
+    if !after_marker.starts_with(|ch: char| ch.is_ascii_whitespace() || ch == '/' || ch == '>') {
+        return None;
+    }
+    let header_end = tag_header_end(block)?;
+    let header = &block["<agent-embed".len()..header_end];
+    let content_start = header_end + 1;
+    let (length, inline) = if header.trim_end().ends_with('/') {
+        (content_start, "")
+    } else {
+        let close = find_ascii_case_insensitive(&block[content_start..], "</agent-embed>")?;
+        let content_end = content_start + close;
+        (
+            content_end + "</agent-embed>".len(),
+            &block[content_start..content_end],
+        )
+    };
+    let node = (inline.trim().len() <= MAX_ARTIFACT_BYTES).then(|| UiNode::Artifact {
+        id: String::new(),
+        title: attribute_value(header, "title")
+            .unwrap_or_else(|| "交互组件 (Interactive Widget)".to_string()),
+        kind: "html".to_string(),
+        content: embedded_content(inline, header, workspace_dir),
+    });
+    Some(ParsedMessageBlock { length, node })
+}
+
+fn tag_header_end(block: &str) -> Option<usize> {
+    let mut quote = None;
+    for (index, ch) in block.char_indices() {
+        match (quote, ch) {
+            (Some(open), close) if open == close => quote = None,
+            (None, '\'' | '"') => quote = Some(ch),
+            (None, '>') => return Some(index),
+            _ => {}
+        }
+    }
+    None
+}
+
+fn find_ascii_case_insensitive(haystack: &str, needle: &str) -> Option<usize> {
+    if needle.is_empty() {
+        return Some(0);
+    }
+    let needle_bytes = needle.as_bytes();
+    haystack.char_indices().find_map(|(index, _)| {
+        haystack
+            .as_bytes()
+            .get(index..index + needle_bytes.len())
+            .filter(|candidate| candidate.eq_ignore_ascii_case(needle_bytes))
+            .map(|_| index)
+    })
+}
+
+fn attribute_value(header: &str, name: &str) -> Option<String> {
+    let mut remaining = header.trim();
+    while !remaining.is_empty() {
+        let name_end = remaining
+            .find(|ch: char| ch.is_ascii_whitespace() || ch == '=' || ch == '/')
+            .unwrap_or(remaining.len());
+        let attribute_name = &remaining[..name_end];
+        let after_name = remaining[name_end..].trim_start();
+        let Some(after_equals) = after_name.strip_prefix('=') else {
+            if name_end == 0 {
+                return None;
+            }
+            remaining = after_name;
+            continue;
+        };
+        let (attribute, rest) = attribute_contents(after_equals.trim_start())?;
+        if attribute_name.eq_ignore_ascii_case(name) {
+            return Some(attribute.to_string());
+        }
+        remaining = rest.trim_start();
+    }
+    None
+}
+
+fn attribute_contents(text: &str) -> Option<(&str, &str)> {
+    let first = text.chars().next()?;
+    if matches!(first, '\'' | '"') {
+        let end = 1 + text[1..].find(first)?;
+        Some((&text[1..end], &text[end + 1..]))
+    } else {
+        let end = text
+            .find(|ch: char| ch.is_ascii_whitespace() || ch == '>')
+            .unwrap_or(text.len());
+        Some((&text[..end], &text[end..]))
+    }
+}
+
+fn embedded_content(
+    inline_content: &str,
+    tag_header: &str,
+    workspace_dir: Option<&Path>,
+) -> String {
+    let inline_content = inline_content.trim();
+    let Some(source) = attribute_value(tag_header, "src") else {
+        return inline_content.to_string();
+    };
+
+    let Some(workspace_dir) = workspace_dir else {
+        return if inline_content.is_empty() {
+            "<p>Embedded file sources require a workspace context.</p>".to_string()
+        } else {
+            inline_content.to_string()
+        };
+    };
+
+    match read_workspace_artifact(workspace_dir, &source) {
+        Ok(content) => content,
+        Err(_) if !inline_content.is_empty() => inline_content.to_string(),
+        Err(_) => "<p>Embedded file is unavailable inside the workspace.</p>".to_string(),
+    }
+}
+
+fn read_workspace_artifact(workspace_dir: &Path, source: &str) -> std::io::Result<String> {
+    let source = source.strip_prefix("file://").unwrap_or(source);
+    let root = std::fs::canonicalize(workspace_dir)?;
+    let candidate = if Path::new(source).is_absolute() {
+        Path::new(source).to_path_buf()
+    } else {
+        root.join(source)
+    };
+    let path = std::fs::canonicalize(candidate)?;
+    if !path.starts_with(&root) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "embedded file escapes workspace",
+        ));
+    }
+    let metadata = std::fs::metadata(&path)?;
+    if !metadata.is_file() || metadata.len() > MAX_ARTIFACT_BYTES as u64 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "embedded file is not a supported artifact",
+        ));
+    }
+    read_bounded_artifact(std::fs::File::open(path)?)
+}
+
+fn read_bounded_artifact(reader: impl std::io::Read) -> std::io::Result<String> {
+    use std::io::Read;
+    let mut content = String::new();
+    reader
+        .take(MAX_ARTIFACT_BYTES as u64 + 1)
+        .read_to_string(&mut content)?;
+    if content.len() > MAX_ARTIFACT_BYTES {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "embedded file exceeds artifact size limit",
+        ));
+    }
+    Ok(content)
+}
+
+fn bounded_text(value: &str) -> bool {
+    value.len() <= MAX_UI_TEXT_BYTES
+}
+
+fn bounded_optional_text(value: Option<&String>) -> bool {
+    value.is_none_or(|text| bounded_text(text))
+}
+
+fn bounded_action(action: Option<&UiAction>) -> bool {
+    let Some(action) = action else {
+        return true;
+    };
+    bounded_text(&action.id)
+        && bounded_text(&action.label)
+        && bounded_optional_text(action.prompt.as_ref())
+        && bounded_optional_text(action.url.as_ref())
+        && bounded_optional_text(action.copy_text.as_ref())
+        && action.payload.as_ref().is_none_or(|payload| {
+            serde_json::to_string(payload).is_ok_and(|json| json.len() <= MAX_UI_TEXT_BYTES)
+        })
+}
+
+fn bounded_finite(value: f32) -> bool {
+    value.is_finite()
+}
+
+fn is_safe_ui_node(node: &UiNode) -> bool {
+    let mut count = 0;
+    validate_ui_node(node, 0, &mut count)
+}
+
+fn validate_ui_node(node: &UiNode, depth: usize, count: &mut usize) -> bool {
+    if depth > MAX_UI_NODE_DEPTH || *count >= MAX_UI_NODE_COUNT {
+        return false;
+    }
+    *count += 1;
+    match node {
+        UiNode::Card {
+            title,
+            subtitle,
+            badge,
+            child,
+        } => {
+            bounded_optional_text(title.as_ref())
+                && bounded_optional_text(subtitle.as_ref())
+                && badge
+                    .as_ref()
+                    .is_none_or(|badge| bounded_text(&badge.label))
+                && validate_ui_node(child, depth + 1, count)
+        }
+        UiNode::Container { gap, children, .. } => {
+            gap.is_none_or(|value| bounded_finite(value) && (0.0..=128.0).contains(&value))
+                && children.len() <= MAX_UI_COLLECTION_ITEMS
+                && children
+                    .iter()
+                    .all(|child| validate_ui_node(child, depth + 1, count))
+        }
+        UiNode::Text { content, .. } => bounded_text(content),
+        UiNode::Badge(badge) => bounded_text(&badge.label),
+        UiNode::Button {
+            id, label, action, ..
+        } => bounded_text(id) && bounded_text(label) && bounded_action(action.as_ref()),
+        UiNode::ChoiceGroup { id, label, options } => {
+            bounded_text(id)
+                && bounded_optional_text(label.as_ref())
+                && options.len() <= MAX_UI_COLLECTION_ITEMS
+                && options.iter().all(|option| {
+                    bounded_text(&option.label)
+                        && bounded_text(&option.value)
+                        && bounded_optional_text(option.prompt.as_ref())
+                })
+        }
+        UiNode::Select {
+            id,
+            label,
+            options,
+            default_value,
+            button_label,
+        } => {
+            bounded_text(id)
+                && bounded_optional_text(label.as_ref())
+                && options.len() <= MAX_UI_COLLECTION_ITEMS
+                && options.iter().all(|option| bounded_text(option))
+                && bounded_optional_text(default_value.as_ref())
+                && bounded_optional_text(button_label.as_ref())
+        }
+        UiNode::InputField {
+            id,
+            label,
+            placeholder,
+            default_value,
+            button_label,
+            action_prompt,
+        } => {
+            bounded_text(id)
+                && bounded_optional_text(label.as_ref())
+                && bounded_optional_text(placeholder.as_ref())
+                && bounded_optional_text(default_value.as_ref())
+                && bounded_optional_text(button_label.as_ref())
+                && bounded_optional_text(action_prompt.as_ref())
+        }
+        UiNode::Toggle {
+            id,
+            label,
+            description,
+            action,
+            ..
+        } => {
+            bounded_text(id)
+                && bounded_text(label)
+                && bounded_optional_text(description.as_ref())
+                && bounded_action(action.as_ref())
+        }
+        UiNode::CheckboxGroup { id, label, items } => {
+            bounded_text(id)
+                && bounded_optional_text(label.as_ref())
+                && items.len() <= MAX_UI_COLLECTION_ITEMS
+                && items
+                    .iter()
+                    .all(|item| bounded_text(&item.label) && bounded_text(&item.value))
+        }
+        UiNode::KeyValueList { items } => {
+            items.len() <= MAX_UI_COLLECTION_ITEMS
+                && items.iter().all(|item| {
+                    bounded_text(&item.key)
+                        && bounded_text(&item.value)
+                        && bounded_optional_text(item.badge.as_ref())
+                })
+        }
+        UiNode::Table { headers, rows } => {
+            headers.len() <= MAX_UI_COLLECTION_ITEMS
+                && rows.len() <= MAX_UI_COLLECTION_ITEMS
+                && headers.iter().all(|header| bounded_text(header))
+                && rows.iter().all(|row| {
+                    row.len() <= MAX_UI_COLLECTION_ITEMS
+                        && row.iter().all(|cell| bounded_text(cell))
+                })
+        }
+        UiNode::Progress {
+            value, max, label, ..
+        } => {
+            bounded_finite(*value)
+                && bounded_finite(*max)
+                && *max > 0.0
+                && bounded_optional_text(label.as_ref())
+        }
+        UiNode::Metric {
+            label,
+            value,
+            change,
+            subtext,
+            ..
+        } => {
+            bounded_text(label)
+                && bounded_text(value)
+                && bounded_optional_text(change.as_ref())
+                && bounded_optional_text(subtext.as_ref())
+        }
+        UiNode::BarChart {
+            title,
+            items,
+            max_value,
+            ..
+        } => {
+            bounded_optional_text(title.as_ref())
+                && items.len() <= MAX_UI_COLLECTION_ITEMS
+                && items.iter().all(|item| {
+                    bounded_text(&item.label)
+                        && bounded_finite(item.value)
+                        && bounded_optional_text(item.display_value.as_ref())
+                })
+                && max_value.is_none_or(|value| bounded_finite(value) && value > 0.0)
+        }
+        UiNode::LineChart {
+            title,
+            points,
+            summary,
+            ..
+        }
+        | UiNode::Sparkline {
+            title,
+            points,
+            summary,
+            ..
+        } => {
+            bounded_optional_text(title.as_ref())
+                && bounded_optional_text(summary.as_ref())
+                && points.len() <= MAX_UI_COLLECTION_ITEMS
+                && points.iter().all(|point| bounded_finite(*point))
+        }
+        UiNode::Callout { title, message, .. } => {
+            bounded_optional_text(title.as_ref()) && bounded_text(message)
+        }
+        UiNode::Accordion {
+            title,
+            subtitle,
+            child,
+        } => {
+            bounded_text(title)
+                && bounded_optional_text(subtitle.as_ref())
+                && validate_ui_node(child, depth + 1, count)
+        }
+        UiNode::Artifact {
+            id,
+            title,
+            kind,
+            content,
+        } => {
+            bounded_text(id)
+                && bounded_text(title)
+                && bounded_text(kind)
+                && content.len() <= MAX_ARTIFACT_BYTES
+        }
+        UiNode::PieChart {
+            title,
+            slices,
+            summary,
+            ..
+        } => {
+            bounded_optional_text(title.as_ref())
+                && bounded_optional_text(summary.as_ref())
+                && slices.len() <= MAX_UI_COLLECTION_ITEMS
+                && slices.iter().all(|slice| {
+                    bounded_text(&slice.label)
+                        && bounded_finite(slice.value)
+                        && slice.value >= 0.0
+                        && bounded_optional_text(slice.display_value.as_ref())
+                })
+        }
+        UiNode::Form {
+            id,
+            title,
+            description,
+            submit_label,
+            fields,
+        } => {
+            bounded_text(id)
+                && bounded_optional_text(title.as_ref())
+                && bounded_optional_text(description.as_ref())
+                && bounded_optional_text(submit_label.as_ref())
+                && fields.len() <= MAX_UI_COLLECTION_ITEMS
+                && fields.iter().all(|field| {
+                    bounded_text(&field.id)
+                        && bounded_text(&field.label)
+                        && bounded_optional_text(field.placeholder.as_ref())
+                        && bounded_optional_text(field.default_value.as_ref())
+                        && field.options.len() <= MAX_UI_COLLECTION_ITEMS
+                        && field.options.iter().all(|option| bounded_text(option))
+                })
+        }
+        UiNode::Rating {
+            id,
+            label,
+            max,
+            value,
+            ..
+        } => {
+            bounded_text(id)
+                && bounded_optional_text(label.as_ref())
+                && (1..=10).contains(max)
+                && value <= max
+        }
+        UiNode::Divider => true,
+    }
 }
 
 /// Injects host semantic design-system tokens and allowed Tailwind CDN into an HTML artifact.
@@ -611,7 +928,7 @@ pub fn inject_theme_variables_to_html(content: &str, is_dark: bool, c: &ThemeCol
 
     let mode_class = if is_dark { "dark" } else { "light" };
     let theme_style = format!(
-        "<style id=\"volt-theme-tokens\">\n\
+        "<style id=\"app-theme-tokens\">\n\
         :root {{\n\
             --background: #{:06x};\n\
             --content: #{:06x};\n\
@@ -648,7 +965,7 @@ pub fn inject_theme_variables_to_html(content: &str, is_dark: bool, c: &ThemeCol
         c.link,
     );
 
-    if let Some(pos) = content.to_lowercase().find("<head>") {
+    if let Some(pos) = find_ascii_case_insensitive(content, "<head>") {
         let insert_idx = pos + 6;
         format!(
             "{}\n<script src=\"https://www.gstatic.com/antigravity/web/dev/tailwindcss.min.js\"></script>\n{}{}",
@@ -656,7 +973,7 @@ pub fn inject_theme_variables_to_html(content: &str, is_dark: bool, c: &ThemeCol
             theme_style,
             &content[insert_idx..]
         )
-    } else if let Some(pos) = content.to_lowercase().find("<html>") {
+    } else if let Some(pos) = find_ascii_case_insensitive(content, "<html>") {
         let insert_idx = pos + 6;
         format!(
             "{}<head>\n<script src=\"https://www.gstatic.com/antigravity/web/dev/tailwindcss.min.js\"></script>\n{}</head>{}",
@@ -1099,34 +1416,24 @@ pub fn render_ui_node<T: 'static>(
                 payload: Some(serde_json::json!({ "id": id, "checked": !checked })),
             });
             let on_action_cb = on_action;
-            let knob = div()
-                .w(px(10.))
-                .h(px(10.))
-                .rounded_full()
-                .bg(if *checked {
-                    rgb(c.accent_green)
-                } else {
-                    rgba(c.foreground_subtle)
-                });
+            let knob = div().w(px(10.)).h(px(10.)).rounded_full().bg(if *checked {
+                rgb(c.accent_green)
+            } else {
+                rgba(c.foreground_subtle)
+            });
 
             let toggle_btn = Button::new(format!("toggle-{}", id))
                 .h(px(26.))
                 .rounded(px(6.))
                 .px_2()
                 .ghost()
-                .child(
-                    div()
-                        .h_flex()
-                        .items_center()
-                        .gap(px(6.))
-                        .child(knob)
-                        .child(
-                            div()
-                                .text_size(px(11.))
-                                .font_medium()
-                                .child(if *checked { "已开启" } else { "已关闭" }),
-                        ),
-                )
+                .child(div().h_flex().items_center().gap(px(6.)).child(knob).child(
+                    div().text_size(px(11.)).font_medium().child(if *checked {
+                        "已开启"
+                    } else {
+                        "已关闭"
+                    }),
+                ))
                 .on_click(cx.listener(move |this, _, window, cx| {
                     on_action_cb(&act, this, window, cx);
                 }));
@@ -1182,7 +1489,11 @@ pub fn render_ui_node<T: 'static>(
                     prompt: Some(format!(
                         "选择复选【{}】（{}）",
                         itm_lbl,
-                        if !itm_checked { "勾选" } else { "取消勾选" }
+                        if !itm_checked {
+                            "勾选"
+                        } else {
+                            "取消勾选"
+                        }
                     )),
                     url: None,
                     copy_text: None,
@@ -1689,11 +2000,7 @@ pub fn render_ui_node<T: 'static>(
                 .gap(px(2.))
                 .children(points.iter().map(|&val| {
                     let ratio = (val / max_val).clamp(0.08, 1.0);
-                    div()
-                        .flex_1()
-                        .h(relative(ratio))
-                        .rounded(px(2.))
-                        .bg(fill)
+                    div().flex_1().h(relative(ratio)).rounded(px(2.)).bg(fill)
                 }));
             wrap.child(bars).into_any_element()
         }
@@ -1846,11 +2153,14 @@ pub fn render_ui_node<T: 'static>(
                     "content": content
                 })),
             };
-            let is_web = matches!(kind.to_lowercase().as_str(), "html" | "html5" | "canvas" | "svg" | "web");
+            let is_web = matches!(
+                kind.to_lowercase().as_str(),
+                "html" | "html5" | "canvas" | "svg" | "web"
+            );
             let web_act = if is_web {
                 Some(UiAction {
                     id: format!("web-art-{}", id),
-                    label: format!("独立 Web 视窗: {}", title),
+                    label: format!("浏览器预览: {}", title),
                     prompt: None,
                     url: None,
                     copy_text: None,
@@ -1917,30 +2227,24 @@ pub fn render_ui_node<T: 'static>(
                         .gap_2()
                         .child(
                             Button::new(format!("btn-copy-art-{}", id))
+                                .accessibility_label("复制代码")
                                 .h(px(24.))
                                 .rounded(px(6.))
                                 .px_2()
                                 .ghost()
-                                .child(
-                                    div()
-                                        .text_size(px(11.))
-                                        .child("复制代码".to_string()),
-                                )
+                                .child(div().text_size(px(11.)).child("复制代码".to_string()))
                                 .on_click(cx.listener(move |this, _, window, cx| {
                                     on_action_copy(&copy_act, this, window, cx);
                                 })),
                         )
                         .child(
                             Button::new(format!("btn-sidebar-art-{}", id))
+                                .accessibility_label("侧栏预览")
                                 .h(px(24.))
                                 .rounded(px(6.))
                                 .px_2()
                                 .secondary()
-                                .child(
-                                    div()
-                                        .text_size(px(11.))
-                                        .child("侧栏预览".to_string()),
-                                )
+                                .child(div().text_size(px(11.)).child("侧栏预览".to_string()))
                                 .on_click(cx.listener(move |this, _, window, cx| {
                                     on_action_sidebar(&sidebar_act, this, window, cx);
                                 })),
@@ -1948,15 +2252,12 @@ pub fn render_ui_node<T: 'static>(
                         .when_some(web_act, |actions, act| {
                             actions.child(
                                 Button::new(format!("btn-web-art-{}", id))
+                                    .accessibility_label("浏览器预览")
                                     .h(px(24.))
                                     .rounded(px(6.))
                                     .px_2()
                                     .outline()
-                                    .child(
-                                        div()
-                                            .text_size(px(11.))
-                                            .child("独立Web视窗".to_string()),
-                                    )
+                                    .child(div().text_size(px(11.)).child("浏览器预览".to_string()))
                                     .on_click(cx.listener(move |this, _, window, cx| {
                                         on_action_web(&act, this, window, cx);
                                     })),
@@ -2076,8 +2377,8 @@ pub fn render_ui_node<T: 'static>(
                         let steps = ((end_ang - start_ang).abs() / 0.08).ceil().max(2.0) as usize;
 
                         if is_donut {
-                            let p0 = center
-                                + point(px(r * start_ang.cos()), px(r * start_ang.sin()));
+                            let p0 =
+                                center + point(px(r * start_ang.cos()), px(r * start_ang.sin()));
                             path.move_to(p0);
                             for step in 1..=steps {
                                 let t = start_ang
@@ -2231,7 +2532,11 @@ pub fn render_ui_node<T: 'static>(
                 summary_lines.push(format!(
                     "{}: {}",
                     f_lbl,
-                    if val_str.is_empty() { "未填写" } else { &val_str }
+                    if val_str.is_empty() {
+                        "未填写"
+                    } else {
+                        &val_str
+                    }
                 ));
                 payload_map.insert(f_id.clone(), serde_json::Value::String(val_str.clone()));
 
@@ -2521,7 +2826,8 @@ fn render_badge(badge: &BadgeNode, c: &crate::theme::ThemeColors) -> AnyElement 
 #[cfg(test)]
 mod tests {
     use super::{
-        parse_message_segments, BadgeTone, ContentSegment, LayoutDirection, TextVariant, UiNode,
+        parse_message_segments, parse_message_segments_with_workspace, BadgeTone, ContentSegment,
+        LayoutDirection, TextVariant, UiNode,
     };
 
     #[test]
@@ -2574,10 +2880,10 @@ mod tests {
         );
         assert_eq!(
             segments[1],
-            ContentSegment::GenerativeUi(UiNode::Text {
+            ContentSegment::GenerativeUi(Box::new(UiNode::Text {
                 content: "卡片内容".to_string(),
                 variant: TextVariant::Body,
-            })
+            }))
         );
         assert_eq!(
             segments[2],
@@ -2590,7 +2896,7 @@ mod tests {
         let msg = "普通代码示例：\n```json-ui\n{ invalid json syntax }\n```";
         let segments = parse_message_segments(msg);
         assert_eq!(segments.len(), 1);
-        assert!(matches!(segments[0], ContentSegment::Markdown(_)));
+        assert_eq!(segments[0], ContentSegment::Markdown(msg.to_string()));
     }
 
     #[test]
@@ -2698,7 +3004,7 @@ mod tests {
             "id": "nginx_conf",
             "title": "反向代理配置",
             "kind": "nginx",
-            "content": "server {\n  listen 80;\n  server_name volt.local;\n}"
+            "content": "server {\n  listen 80;\n  server_name app.local;\n}"
         }"#;
         let artifact: Result<UiNode, _> = serde_json::from_str(artifact_json);
         assert!(artifact.is_ok());
@@ -2720,7 +3026,10 @@ mod tests {
         let node: Result<UiNode, _> = serde_json::from_str(json);
         assert!(node.is_ok());
         if let Ok(UiNode::PieChart {
-            slices, donut, summary, ..
+            slices,
+            donut,
+            summary,
+            ..
         }) = node
         {
             assert_eq!(slices.len(), 3);
@@ -2773,20 +3082,26 @@ mod tests {
             segments[0],
             ContentSegment::Markdown("如下是内嵌前端小组件：\n\n".to_string())
         );
-        if let ContentSegment::GenerativeUi(UiNode::Artifact {
-            title,
-            kind,
-            content,
-            ..
-        }) = &segments[1]
-        {
+        if let ContentSegment::GenerativeUi(node) = &segments[1] {
+            let UiNode::Artifact {
+                title,
+                kind,
+                content,
+                ..
+            } = node.as_ref()
+            else {
+                panic!("Expected Artifact from agent-embed");
+            };
             assert_eq!(title, "计数器小组件");
             assert_eq!(kind, "html");
             assert!(content.contains("点击递增"));
         } else {
             panic!("Expected Artifact from agent-embed");
         }
-        assert_eq!(segments[2], ContentSegment::Markdown("\n请查收。".to_string()));
+        assert_eq!(
+            segments[2],
+            ContentSegment::Markdown("\n请查收。".to_string())
+        );
     }
 
     #[test]
@@ -2794,13 +3109,16 @@ mod tests {
         let msg = "已生成数据看板：\n\n```html:artifact title=\"业务大屏\"\n<div class=\"dashboard\">大屏内容</div>\n```\n可随时在侧栏或独立视窗预览。";
         let segments = parse_message_segments(msg);
         assert_eq!(segments.len(), 3);
-        if let ContentSegment::GenerativeUi(UiNode::Artifact {
-            title,
-            kind,
-            content,
-            ..
-        }) = &segments[1]
-        {
+        if let ContentSegment::GenerativeUi(node) = &segments[1] {
+            let UiNode::Artifact {
+                title,
+                kind,
+                content,
+                ..
+            } = node.as_ref()
+            else {
+                panic!("Expected Artifact from html:artifact code block");
+            };
             assert_eq!(title, "业务大屏");
             assert_eq!(kind, "html");
             assert_eq!(content, "<div class=\"dashboard\">大屏内容</div>");
@@ -2818,5 +3136,163 @@ mod tests {
         assert!(injected.contains("--card:"));
         assert!(injected.contains("--background:"));
         assert!(injected.contains("tailwindcss.min.js"));
+    }
+
+    #[test]
+    fn case_insensitive_markers_keep_unicode_offsets_safe() {
+        let message = "前缀 İİ\n```JSON-UI\n{\"type\":\"text\",\"content\":\"安全\"}\n```";
+        let segments = parse_message_segments(message);
+        assert!(matches!(
+            segments.get(1),
+            Some(ContentSegment::GenerativeUi(node))
+                if matches!(node.as_ref(), UiNode::Text { content, .. } if content == "安全")
+        ));
+    }
+
+    #[test]
+    fn oversized_ui_blocks_remain_markdown() {
+        let content = "x".repeat(super::MAX_ARTIFACT_BYTES + 1);
+        let message = format!("```json-ui\n{{\"type\":\"text\",\"content\":\"{content}\"}}\n```");
+        let segments = parse_message_segments(&message);
+        assert!(matches!(
+            segments.as_slice(),
+            [ContentSegment::Markdown(markdown)] if markdown == &message
+        ));
+    }
+
+    #[test]
+    fn preserves_invalid_blocks_before_valid_ui() {
+        let invalid = "前缀\n```json-ui\n{invalid}\n```\n";
+        let valid = "```ui\n{\"type\":\"text\",\"content\":\"valid\"}\n```";
+        let segments = parse_message_segments(&format!("{invalid}{valid}尾部"));
+        assert_eq!(segments[0], ContentSegment::Markdown(invalid.to_string()));
+        assert!(matches!(segments[1], ContentSegment::GenerativeUi(_)));
+        assert_eq!(segments[2], ContentSegment::Markdown("尾部".to_string()));
+    }
+
+    #[test]
+    fn preserves_incomplete_embeds_and_plain_text() {
+        for message in [
+            "",
+            "只有 Markdown",
+            "前缀 <agent-embed title=\"未结束",
+            "前缀 <agent-embed>没有关闭标签",
+            "前缀 <agent-embedded>保留原文</agent-embed>",
+        ] {
+            let segments = parse_message_segments(message);
+            let markdown: String = segments
+                .iter()
+                .map(|segment| match segment {
+                    ContentSegment::Markdown(text) => text.as_str(),
+                    _ => panic!("Malformed embed must remain markdown"),
+                })
+                .collect();
+            assert_eq!(markdown, message);
+        }
+    }
+
+    #[test]
+    fn self_closing_embeds_do_not_consume_later_blocks() {
+        let message = "<agent-embed title='first'/>between<agent-embed title='second'><p>second</p></agent-embed>after";
+        let segments = parse_message_segments(message);
+        assert_eq!(segments.len(), 4);
+        assert!(matches!(
+            &segments[0],
+            ContentSegment::GenerativeUi(node)
+                if matches!(node.as_ref(), UiNode::Artifact { title, content, .. }
+                    if title == "first" && content.is_empty())
+        ));
+        assert_eq!(segments[1], ContentSegment::Markdown("between".to_string()));
+        assert!(matches!(
+            &segments[2],
+            ContentSegment::GenerativeUi(node)
+                if matches!(node.as_ref(), UiNode::Artifact { title, content, .. }
+                    if title == "second" && content == "<p>second</p>")
+        ));
+        assert_eq!(segments[3], ContentSegment::Markdown("after".to_string()));
+    }
+
+    #[test]
+    fn embed_attributes_respect_names_and_quotes() {
+        let message = r#"<AGENT-EMBED data-src="missing.html" title='a > b; src="also-missing"'><p>inline</p></AGENT-EMBED>"#;
+        let segments = parse_message_segments(message);
+        assert!(matches!(
+            segments.as_slice(),
+            [ContentSegment::GenerativeUi(node)]
+                if matches!(node.as_ref(), UiNode::Artifact { title, content, .. }
+                    if title == "a > b; src=\"also-missing\"" && content == "<p>inline</p>")
+        ));
+        assert_eq!(super::attribute_value("data-src='a'", "src"), None);
+        assert_eq!(super::attribute_value("title='src=\"a\"'", "src"), None);
+        assert_eq!(
+            super::attribute_value("disabled SRC = 'nested/a.html'", "src").as_deref(),
+            Some("nested/a.html")
+        );
+    }
+
+    #[test]
+    fn json_artifacts_preserve_their_ids() {
+        let message = r#"```ui
+{"type":"artifact","id":"user_id","title":"sample","content":"sample"}
+```"#;
+        let segments = parse_message_segments(message);
+        assert!(matches!(
+            segments.as_slice(),
+            [ContentSegment::GenerativeUi(node)]
+                if matches!(node.as_ref(), UiNode::Artifact { id, .. } if id == "user_id")
+        ));
+    }
+
+    #[test]
+    fn oversized_html_and_embed_blocks_preserve_the_original_message() {
+        let content = "x".repeat(super::MAX_ARTIFACT_BYTES + 1);
+        for message in [
+            format!("before```html:artifact\n{content}\n```after"),
+            format!("before<agent-embed>{content}</agent-embed>after"),
+        ] {
+            assert_eq!(
+                parse_message_segments(&message),
+                vec![ContentSegment::Markdown(message)]
+            );
+        }
+    }
+
+    #[test]
+    fn artifact_reads_enforce_the_limit_while_reading() {
+        let allowed = "x".repeat(super::MAX_ARTIFACT_BYTES);
+        assert_eq!(
+            super::read_bounded_artifact(allowed.as_bytes()).unwrap(),
+            allowed
+        );
+        let oversized = "x".repeat(super::MAX_ARTIFACT_BYTES + 1);
+        assert!(super::read_bounded_artifact(oversized.as_bytes()).is_err());
+    }
+
+    #[test]
+    fn embedded_sources_are_limited_to_the_workspace() {
+        let workspace = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let allowed = workspace.path().join("widget.html");
+        let blocked = outside.path().join("secret.html");
+        std::fs::write(&allowed, "<p>allowed</p>").unwrap();
+        std::fs::write(&blocked, "<p>secret</p>").unwrap();
+
+        let allowed_message = format!(r#"<agent-embed src="{}"/>"#, allowed.display());
+        let allowed_segments =
+            parse_message_segments_with_workspace(&allowed_message, workspace.path());
+        assert!(matches!(
+            allowed_segments.as_slice(),
+            [ContentSegment::GenerativeUi(node)]
+                if matches!(node.as_ref(), UiNode::Artifact { content, .. } if content == "<p>allowed</p>")
+        ));
+
+        let blocked_message = format!(r#"<agent-embed src="{}"/>"#, blocked.display());
+        let blocked_segments =
+            parse_message_segments_with_workspace(&blocked_message, workspace.path());
+        assert!(matches!(
+            blocked_segments.as_slice(),
+            [ContentSegment::GenerativeUi(node)]
+                if matches!(node.as_ref(), UiNode::Artifact { content, .. } if !content.contains("secret"))
+        ));
     }
 }

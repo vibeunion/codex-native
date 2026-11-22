@@ -1,25 +1,18 @@
 use anyhow::{bail, Context, Result};
 use async_trait::async_trait;
 use serde_json::Value;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
-use super::Tool;
+use super::{Tool, WorkspacePath};
 
 pub struct ReadFileTool {
-    workspace_dir: PathBuf,
+    workspace: WorkspacePath,
 }
 
 impl ReadFileTool {
     pub fn new(workspace_dir: PathBuf) -> Self {
-        Self { workspace_dir }
-    }
-
-    fn resolve_path(&self, p: &str) -> PathBuf {
-        let path = Path::new(p);
-        if path.is_absolute() {
-            path.to_path_buf()
-        } else {
-            self.workspace_dir.join(path)
+        Self {
+            workspace: WorkspacePath::new(workspace_dir),
         }
     }
 }
@@ -59,7 +52,7 @@ impl Tool for ReadFileTool {
         let path_str = arguments["path"]
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("Missing 'path'"))?;
-        let full_path = self.resolve_path(path_str);
+        let full_path = self.workspace.existing(path_str)?;
 
         let content = tokio::fs::read_to_string(&full_path)
             .await
@@ -68,25 +61,18 @@ impl Tool for ReadFileTool {
         let lines: Vec<&str> = content.lines().collect();
         let total_lines = lines.len();
 
-        let start = arguments
-            .get("start_line")
-            .and_then(|v| v.as_u64())
-            .map(|v| v.max(1) as usize)
-            .unwrap_or(1);
-
-        let end = arguments
-            .get("end_line")
-            .and_then(|v| v.as_u64())
-            .map(|v| (v as usize).min(total_lines))
-            .unwrap_or(total_lines);
-
+        let start = line_parameter(&arguments, "start_line")?.unwrap_or(1);
+        let requested_end = line_parameter(&arguments, "end_line")?;
+        if requested_end.is_some_and(|end| end < start) {
+            bail!("end_line must be greater than or equal to start_line");
+        }
+        let end = requested_end.unwrap_or(total_lines).min(total_lines);
         if start > total_lines {
             return Ok(format!(
                 "File has only {} lines (requested start at line {})",
                 total_lines, start
             ));
         }
-
         let slice = &lines[(start - 1)..end];
         let mut out = String::new();
         for (i, line) in slice.iter().enumerate() {
@@ -96,21 +82,27 @@ impl Tool for ReadFileTool {
     }
 }
 
+fn line_parameter(arguments: &Value, name: &str) -> Result<Option<usize>> {
+    arguments
+        .get(name)
+        .map(|input| {
+            let number = input
+                .as_u64()
+                .filter(|number| *number > 0)
+                .with_context(|| format!("{name} must be a positive integer"))?;
+            usize::try_from(number).with_context(|| format!("{name} is too large"))
+        })
+        .transpose()
+}
+
 pub struct WriteFileTool {
-    workspace_dir: PathBuf,
+    workspace: WorkspacePath,
 }
 
 impl WriteFileTool {
     pub fn new(workspace_dir: PathBuf) -> Self {
-        Self { workspace_dir }
-    }
-
-    fn resolve_path(&self, p: &str) -> PathBuf {
-        let path = Path::new(p);
-        if path.is_absolute() {
-            path.to_path_buf()
-        } else {
-            self.workspace_dir.join(path)
+        Self {
+            workspace: WorkspacePath::new(workspace_dir),
         }
     }
 }
@@ -150,7 +142,7 @@ impl Tool for WriteFileTool {
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("Missing 'content'"))?;
 
-        let full_path = self.resolve_path(path_str);
+        let full_path = self.workspace.for_write(path_str)?;
         if let Some(parent) = full_path.parent() {
             tokio::fs::create_dir_all(parent).await?;
         }
@@ -165,20 +157,13 @@ impl Tool for WriteFileTool {
 }
 
 pub struct EditFileTool {
-    workspace_dir: PathBuf,
+    workspace: WorkspacePath,
 }
 
 impl EditFileTool {
     pub fn new(workspace_dir: PathBuf) -> Self {
-        Self { workspace_dir }
-    }
-
-    fn resolve_path(&self, p: &str) -> PathBuf {
-        let path = Path::new(p);
-        if path.is_absolute() {
-            path.to_path_buf()
-        } else {
-            self.workspace_dir.join(path)
+        Self {
+            workspace: WorkspacePath::new(workspace_dir),
         }
     }
 }
@@ -225,7 +210,7 @@ impl Tool for EditFileTool {
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("Missing 'replacement_content'"))?;
 
-        let full_path = self.resolve_path(path_str);
+        let full_path = self.workspace.existing(path_str)?;
         let content = tokio::fs::read_to_string(&full_path).await?;
 
         let count = content.matches(target).count();
@@ -246,5 +231,29 @@ impl Tool for EditFileTool {
             "Successfully replaced 1 occurrence in {:?}",
             full_path
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ReadFileTool, Tool};
+    use serde_json::json;
+
+    #[tokio::test]
+    async fn rejects_reversed_line_ranges_without_panicking() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("sample.txt");
+        std::fs::write(&path, "one\ntwo\nthree\n").unwrap();
+        let tool = ReadFileTool::new(root.path().to_owned());
+
+        let result = tool
+            .execute(json!({
+                "path": "sample.txt",
+                "start_line": 3,
+                "end_line": 2
+            }))
+            .await;
+
+        assert!(result.is_err());
     }
 }

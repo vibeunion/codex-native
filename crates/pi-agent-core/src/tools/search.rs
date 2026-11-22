@@ -1,11 +1,22 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use async_trait::async_trait;
 use regex::Regex;
 use serde_json::Value;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use tokio::fs::{self, ReadDir};
 
-use super::Tool;
+use super::{Tool, WorkspacePath};
+
+fn search_result_limit(arguments: &Value) -> Result<usize> {
+    let Some(input) = arguments.get("max_results") else {
+        return Ok(100);
+    };
+    let limit = input
+        .as_u64()
+        .filter(|limit| (1..=10_000).contains(limit))
+        .ok_or_else(|| anyhow::anyhow!("max_results must be an integer between 1 and 10000"))?;
+    Ok(limit as usize)
+}
 
 /// Depth-first traversal whose filesystem operations and directory boundaries
 /// yield to the runtime. Dropping a search drops this traversal as well.
@@ -23,25 +34,34 @@ impl SearchWalk {
         }
     }
 
-    async fn next(&mut self) -> Option<(PathBuf, bool)> {
+    async fn next(&mut self) -> Result<Option<(PathBuf, bool)>> {
         if let Some(root) = self.root.take() {
-            let metadata = fs::metadata(&root).await.ok()?;
+            let metadata = fs::metadata(&root)
+                .await
+                .with_context(|| format!("Failed to inspect search path: {}", root.display()))?;
             if metadata.is_dir() {
                 self.pending_dir = Some(root.clone());
             }
-            return Some((root, metadata.is_file()));
+            return Ok(Some((root, metadata.is_file())));
         }
         loop {
             tokio::task::yield_now().await;
             if let Some(path) = self.pending_dir.take() {
-                if let Ok(directory) = fs::read_dir(path).await {
-                    self.directories.push(directory);
-                }
+                let directory = fs::read_dir(&path)
+                    .await
+                    .with_context(|| format!("Failed to search directory: {}", path.display()))?;
+                self.directories.push(directory);
             }
-            let directory = self.directories.last_mut()?;
-            let entry = match directory.next_entry().await {
-                Ok(Some(entry)) => entry,
-                Ok(None) | Err(_) => {
+            let Some(directory) = self.directories.last_mut() else {
+                return Ok(None);
+            };
+            let entry = match directory
+                .next_entry()
+                .await
+                .context("Failed to read a search directory entry")?
+            {
+                Some(entry) => entry,
+                None => {
                     self.directories.pop();
                     continue;
                 }
@@ -51,25 +71,28 @@ impl SearchWalk {
             if name.starts_with('.') || name == "target" || name == "node_modules" {
                 continue;
             }
-            let Ok(kind) = entry.file_type().await else {
-                continue;
-            };
             let path = entry.path();
+            let kind = entry
+                .file_type()
+                .await
+                .with_context(|| format!("Failed to inspect search entry: {}", path.display()))?;
             if kind.is_dir() {
                 self.pending_dir = Some(path.clone());
             }
-            return Some((path, kind.is_file()));
+            return Ok(Some((path, kind.is_file())));
         }
     }
 }
 
 pub struct GrepTool {
-    workspace_dir: PathBuf,
+    workspace: WorkspacePath,
 }
 
 impl GrepTool {
     pub fn new(workspace_dir: PathBuf) -> Self {
-        Self { workspace_dir }
+        Self {
+            workspace: WorkspacePath::new(workspace_dir),
+        }
     }
 }
 
@@ -80,7 +103,7 @@ impl Tool for GrepTool {
     }
 
     fn description(&self) -> &'static str {
-        "Search file contents for a regex pattern within the workspace."
+        "Search file contents for a regex pattern within the workspace. Recursive searches skip non-UTF-8 files; explicit file read errors and traversal errors are reported."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -110,41 +133,49 @@ impl Tool for GrepTool {
         let pattern_str = arguments["pattern"]
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("Missing 'pattern'"))?;
-        let sub_path = arguments
-            .get("path")
-            .and_then(|v| v.as_str())
-            .unwrap_or(".");
-        let max_results = arguments
-            .get("max_results")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(100) as usize;
-
-        let root = if Path::new(sub_path).is_absolute() {
-            PathBuf::from(sub_path)
-        } else {
-            self.workspace_dir.join(sub_path)
+        let sub_path = match arguments.get("path") {
+            Some(input) => input
+                .as_str()
+                .ok_or_else(|| anyhow::anyhow!("path must be a string"))?,
+            None => ".",
         };
+        let max_results = search_result_limit(&arguments)?;
+        let workspace_root = self.workspace.root()?;
+        let root = self.workspace.existing(sub_path)?;
+        let explicit_file = fs::metadata(&root)
+            .await
+            .with_context(|| format!("Failed to inspect search path: {}", root.display()))?
+            .is_file();
 
         let re = Regex::new(pattern_str)?;
         let mut matches = Vec::new();
 
         let mut entries = SearchWalk::new(root);
-        while let Some((path, is_file)) = entries.next().await {
+        while let Some((path, is_file)) = entries.next().await? {
             if !is_file {
                 continue;
             }
 
-            if let Ok(content) = fs::read_to_string(&path).await {
-                let rel = path.strip_prefix(&self.workspace_dir).unwrap_or(&path);
-                for (idx, line) in content.lines().enumerate() {
-                    if idx % 256 == 0 {
-                        tokio::task::yield_now().await;
-                    }
-                    if re.is_match(line) {
-                        matches.push(format!("{}:{}: {}", rel.display(), idx + 1, line.trim()));
-                        if matches.len() >= max_results {
-                            break;
-                        }
+            let content = match fs::read_to_string(&path).await {
+                Ok(content) => content,
+                Err(error) if !explicit_file && error.kind() == std::io::ErrorKind::InvalidData => {
+                    continue;
+                }
+                Err(error) => {
+                    return Err(error).with_context(|| {
+                        format!("Failed to read search file: {}", path.display())
+                    });
+                }
+            };
+            let rel = path.strip_prefix(&workspace_root).unwrap_or(&path);
+            for (idx, line) in content.lines().enumerate() {
+                if idx % 256 == 0 {
+                    tokio::task::yield_now().await;
+                }
+                if re.is_match(line) {
+                    matches.push(format!("{}:{}: {}", rel.display(), idx + 1, line.trim()));
+                    if matches.len() >= max_results {
+                        break;
                     }
                 }
             }
@@ -162,12 +193,14 @@ impl Tool for GrepTool {
 }
 
 pub struct FindTool {
-    workspace_dir: PathBuf,
+    workspace: WorkspacePath,
 }
 
 impl FindTool {
     pub fn new(workspace_dir: PathBuf) -> Self {
-        Self { workspace_dir }
+        Self {
+            workspace: WorkspacePath::new(workspace_dir),
+        }
     }
 }
 
@@ -204,15 +237,13 @@ impl Tool for FindTool {
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("Missing 'pattern'"))?
             .to_lowercase();
-        let max_results = arguments
-            .get("max_results")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(100) as usize;
+        let max_results = search_result_limit(&arguments)?;
 
         let mut matches = Vec::new();
-        let mut entries = SearchWalk::new(self.workspace_dir.clone());
-        while let Some((path, _)) = entries.next().await {
-            let rel = path.strip_prefix(&self.workspace_dir).unwrap_or(&path);
+        let workspace_root = self.workspace.root()?;
+        let mut entries = SearchWalk::new(workspace_root.clone());
+        while let Some((path, _)) = entries.next().await? {
+            let rel = path.strip_prefix(&workspace_root).unwrap_or(&path);
             let rel_str = rel.to_string_lossy();
             if rel_str.to_lowercase().contains(&pattern_str) {
                 matches.push(rel_str.to_string());
@@ -245,7 +276,7 @@ mod tests {
         let scan = tokio::spawn(async move {
             let mut started = Some(started);
             let mut count = 0;
-            while entries.next().await.is_some() {
+            while entries.next().await.unwrap().is_some() {
                 count += 1;
                 if count == 64 {
                     let _ = started.take().unwrap().send(());
@@ -278,5 +309,28 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(grep, "src/hit.txt:1: needle");
+    }
+
+    #[tokio::test]
+    async fn traversal_reports_missing_root_instead_of_an_empty_walk() {
+        let root = tempfile::tempdir().unwrap();
+        let mut entries = SearchWalk::new(root.path().join("missing"));
+        let error = entries.next().await.unwrap_err();
+        assert!(format!("{error:#}").contains("missing"));
+    }
+
+    #[tokio::test]
+    async fn traversal_reports_directory_disappearing_before_descent() {
+        let root = tempfile::tempdir().unwrap();
+        let directory = root.path().join("removed");
+        std::fs::create_dir(&directory).unwrap();
+        let mut entries = SearchWalk::new(directory.clone());
+        assert_eq!(
+            entries.next().await.unwrap(),
+            Some((directory.clone(), false))
+        );
+        std::fs::remove_dir(&directory).unwrap();
+        let error = entries.next().await.unwrap_err();
+        assert!(format!("{error:#}").contains("removed"));
     }
 }

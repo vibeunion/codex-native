@@ -57,7 +57,7 @@ pub async fn execute(
                 .get("label")
                 .and_then(Value::as_str)
                 .filter(|value| !value.trim().is_empty())
-                .unwrap_or_else(|| if index == 0 { "Analysis" } else { "Worker" })
+                .unwrap_or(if index == 0 { "Analysis" } else { "Worker" })
                 .trim()
                 .chars()
                 .take(80)
@@ -132,6 +132,8 @@ pub async fn execute(
     for (index, (_, prompt)) in task_data.iter().enumerate() {
         let mut child = parent.clone();
         child.tools = read_only_tools(parent);
+        // Specialist calls belong to their workflow, not the parent's chat journal.
+        child.tool_checkpoints = None;
         child.max_iterations = parent.max_iterations.min(6);
         let prompt = prompt.clone();
         let updates_tx = updates_tx.clone();

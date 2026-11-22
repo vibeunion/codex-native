@@ -3,10 +3,16 @@ use gpui_kit::component::select::{SelectEvent, SelectState};
 use gpui_kit::component::*;
 use gpui_kit::*;
 use pi_agent_core::skills::{SkillCategory, SkillRegistry};
-use pi_agent_core::{AgentEvent, Message, ModelConfig, PiAgent, Session};
+use pi_agent_core::{
+    auth::CredentialStore, AgentEvent, AppIdentity, EngineKind, Message, ModelConfig, PiAgent,
+    PolicyProfile, Session,
+};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
+mod agentconfig_links;
+mod agentconfig_sources;
+mod agentconfig_sync;
 mod desktop_state;
 mod execution;
 mod file_summary;
@@ -15,6 +21,7 @@ mod i18n;
 mod installer;
 mod interactions;
 mod panels;
+mod projects;
 mod review;
 mod settings;
 mod task_state;
@@ -64,10 +71,18 @@ pub enum ArtifactViewMode {
 }
 
 pub struct PiDesktopApp {
+    pub identity: AppIdentity,
     pub artifact_pane: Option<ArtifactPaneState>,
     pub artifact_visible: bool,
     pub artifact_view_mode: ArtifactViewMode,
     workspace_dir: PathBuf,
+    project_menu: Entity<gpui_kit::component::list::ListState<projects::ProjectList>>,
+    project_menu_open: bool,
+    project_selecting: bool,
+    project_navigation_generation: u64,
+    project_error: String,
+    project_trigger_focus: FocusHandle,
+    project_selection: Option<Task<()>>,
     session: Session,
     session_history: HashMap<String, Session>,
     task_states: HashMap<String, task_state::TaskState>,
@@ -91,14 +106,20 @@ pub struct PiDesktopApp {
     agent: Arc<PiAgent>,
     workflow_controls: pi_agent_core::workflow_control::WorkflowControls,
     input_state: Entity<TextareaState>,
-    settings_general_language: Entity<SelectState<Vec<SharedString>>>,
-    settings_appearance_theme: Entity<SelectState<Vec<SharedString>>>,
-    settings_footer_language: Entity<SelectState<Vec<SharedString>>>,
-    settings_footer_theme: Entity<SelectState<Vec<SharedString>>>,
+    settings_general_language: Entity<SelectState<settings::SettingsChoices>>,
+    settings_engine: Entity<SelectState<settings::SettingsChoices>>,
+    settings_auth_provider: Entity<SelectState<settings::SettingsChoices>>,
+    settings_appearance_theme: Entity<SelectState<settings::SettingsChoices>>,
+    settings_footer_language: Entity<SelectState<settings::SettingsChoices>>,
+    settings_footer_theme: Entity<SelectState<settings::SettingsChoices>>,
     settings_base_input: Entity<InputState>,
     settings_key_input: Entity<InputState>,
     settings_model_input: Entity<InputState>,
     settings_font_input: Entity<InputState>,
+    agentconfig_password_input: Entity<InputState>,
+    agentconfig_backup_password_input: Entity<InputState>,
+    agentconfig_url_input: Entity<InputState>,
+    agentconfig_model_select: Entity<SelectState<Vec<SharedString>>>,
     search_input: Entity<InputState>,
     skill_search_input: Entity<InputState>,
     selected_nav: &'static str,
@@ -116,6 +137,21 @@ pub struct PiDesktopApp {
     model_identifier: String,
     settings_saved: bool,
     settings_error: String,
+    agentconfig_pending_raw: Option<String>,
+    agentconfig_pending_preview: Option<pi_agent_core::agent_config::AgentConfigPreview>,
+    agentconfig_resolved_import: Option<pi_agent_core::agent_config::ImportedConfig>,
+    agentconfig_status: String,
+    agentconfig_utility_status: String,
+    agentconfig_backup_expanded: bool,
+    agentconfig_configurations: Vec<agentconfig_sources::Configuration>,
+    agentconfig_pending_source: Option<String>,
+    agentconfig_source_checked_at: Option<u64>,
+    agentconfig_pending_target: Option<String>,
+    agentconfig_pending_original: Option<String>,
+    agentconfig_fetch_generation: u64,
+    agentconfig_fetching: bool,
+    agentconfig_fetch_abort: Option<tokio::task::AbortHandle>,
+    agentconfig_remove_target: Option<String>,
     status_message: String,
     tokens_used: usize,
     is_executing: bool,
@@ -179,6 +215,17 @@ impl PiDesktopApp {
 
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let workspace_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        Self::for_workspace(workspace_dir, false, None, window, cx)
+    }
+
+    fn for_workspace(
+        workspace_dir: PathBuf,
+        start_task: bool,
+        runtime_key: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let identity = AppIdentity::from_environment();
         let store = desktop_state::Store::for_workspace(&workspace_dir);
         let (saved, storage_error) = match store.load() {
             Ok(saved) => (saved, String::new()),
@@ -197,24 +244,50 @@ impl PiDesktopApp {
             }
         }
         for session in saved.sessions.values_mut() {
+            if !session.engine.is_compiled() {
+                session.set_engine(EngineKind::default());
+            }
             execution::reconcile_interrupted_tools(&mut session.messages);
         }
-        let preferences = saved.preferences.clone();
+        let mut preferences = saved.preferences.clone();
+        if !preferences.engine.is_compiled() {
+            preferences.engine = EngineKind::default();
+            preferences.policy_profile = PolicyProfile::default();
+        }
         let language = preferences.language;
         let api_base = std::env::var("OPENAI_BASE_URL")
             .ok()
             .or(preferences.api_base.clone())
             .unwrap_or_else(|| "https://token.sensenova.cn/v1".into());
-        let api_key = std::env::var("SENSENOVA_API_KEY")
-            .or_else(|_| std::env::var("OPENAI_API_KEY"))
-            .unwrap_or_default();
+        let oauth_token = preferences
+            .auth_provider
+            .filter(|provider| provider.supplies_model_credential())
+            .and_then(|provider| {
+                CredentialStore::new(CredentialStore::default_path())
+                    .load()
+                    .ok()
+                    .and_then(|records| records.get(&provider).cloned())
+                    .map(|record| record.access_token)
+            });
+        let api_key = runtime_key.unwrap_or_else(|| {
+            let configured = preferences.startup_api_key(
+                std::env::var("SENSENOVA_API_KEY")
+                    .or_else(|_| std::env::var("OPENAI_API_KEY"))
+                    .ok(),
+            );
+            if configured.trim().is_empty() {
+                oauth_token.unwrap_or_default()
+            } else {
+                configured
+            }
+        });
         let model_identifier = preferences.model.clone();
         let agent = Arc::new(PiAgent::new(workspace_dir.clone(), ModelConfig::default()));
         let input_state = cx.new(|cx| {
             TextareaState::new(window, cx)
                 .auto_grow(2, 8)
                 .submit_on_enter(true)
-                .placeholder(language.text().input_placeholder)
+                .placeholder(language.text().input_placeholder_for(&identity))
         });
         let terminal_input =
             cx.new(|cx| InputState::new(window, cx).placeholder("输入命令 / Enter command"));
@@ -222,7 +295,7 @@ impl PiDesktopApp {
             cx.new(|cx| InputState::new(window, cx).placeholder("搜索文件 / Search files"));
         let settings_general_language = cx.new(|cx| {
             SelectState::new(
-                vec![SharedString::from("中文"), SharedString::from("English")],
+                settings::settings_choices(vec!["中文".into(), "English".into()]),
                 Some(IndexPath::new(if language == Language::Chinese {
                     0
                 } else {
@@ -234,15 +307,33 @@ impl PiDesktopApp {
         });
         let settings_appearance_theme = cx.new(|cx| {
             SelectState::new(
-                settings::theme_labels(language),
+                settings::settings_choices(settings::theme_labels(language)),
                 Some(IndexPath::new(settings::theme_index(preferences.theme))),
+                window,
+                cx,
+            )
+        });
+        let settings_engine = cx.new(|cx| {
+            SelectState::new(
+                settings::settings_choices(settings::engine_labels(language)),
+                Some(IndexPath::new(settings::engine_index(preferences.engine))),
+                window,
+                cx,
+            )
+        });
+        let settings_auth_provider = cx.new(|cx| {
+            SelectState::new(
+                settings::settings_choices(settings::auth_provider_labels(language)),
+                Some(IndexPath::new(settings::auth_provider_index(
+                    preferences.auth_provider,
+                ))),
                 window,
                 cx,
             )
         });
         let settings_footer_language = cx.new(|cx| {
             SelectState::new(
-                vec![SharedString::from("中文"), SharedString::from("English")],
+                settings::settings_choices(vec!["中文".into(), "English".into()]),
                 Some(IndexPath::new(if language == Language::Chinese {
                     0
                 } else {
@@ -254,7 +345,7 @@ impl PiDesktopApp {
         });
         let settings_footer_theme = cx.new(|cx| {
             SelectState::new(
-                settings::theme_labels(language),
+                settings::settings_choices(settings::theme_labels(language)),
                 Some(IndexPath::new(settings::theme_index(preferences.theme))),
                 window,
                 cx,
@@ -265,13 +356,16 @@ impl PiDesktopApp {
         let settings_key_input = cx.new(|cx| {
             InputState::new(window, cx)
                 .masked(true)
-                .placeholder(if language == Language::Chinese {
-                    "输入 API Key"
-                } else {
-                    "Enter API key"
-                })
+                .placeholder(language.text().api_key_placeholder)
         });
         let settings_model_input = cx.new(|cx| InputState::new(window, cx));
+        let agentconfig_password_input = cx.new(|cx| InputState::new(window, cx).masked(true));
+        let agentconfig_backup_password_input =
+            cx.new(|cx| InputState::new(window, cx).masked(true));
+        let agentconfig_url_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder("https://example.com/team.acfg"));
+        let agentconfig_model_select =
+            cx.new(|cx| SelectState::new(Vec::<SharedString>::new(), None, window, cx));
         let settings_font_input = cx.new(|cx| InputState::new(window, cx));
         settings_font_input.update(cx, |input, cx| {
             input.set_value(
@@ -297,12 +391,15 @@ impl PiDesktopApp {
         let skill_search_input =
             cx.new(|cx| InputState::new(window, cx).placeholder("搜索技能 / Search skills"));
         let mut session_history = saved.sessions;
-        let session = session_history
-            .get(&saved.active_id)
-            .cloned()
-            .unwrap_or_else(|| {
-                Session::new(desktop_state::new_id(), language.text().new_conversation)
-            });
+        let mut session = projects::project_session(
+            &session_history,
+            &saved.active_id,
+            start_task,
+            language.text().new_conversation,
+        );
+        if session.messages.is_empty() {
+            session.set_engine(preferences.engine);
+        }
         session_history.insert(session.id.clone(), session.clone());
         let mut restored: Vec<_> = session_history.values().cloned().collect();
         restored.sort_by_key(|session| std::cmp::Reverse(session.updated_at));
@@ -341,10 +438,95 @@ impl PiDesktopApp {
                     cx.notify();
                 }),
             ];
+        let project_menu = cx.new(|cx| {
+            gpui_kit::component::list::ListState::new(
+                projects::ProjectList::new(vec![workspace_dir.clone()], workspace_dir.clone()),
+                window,
+                cx,
+            )
+            .searchable(true)
+        });
+        subscriptions.push(cx.subscribe_in(
+            &project_menu,
+            window,
+            |this, list, event, window, cx| {
+                use gpui_kit::component::list::ListEvent;
+                match event {
+                    ListEvent::Confirm(index) => {
+                        let path = list.read(cx).delegate().path_at(*index).cloned();
+                        if let Some(path) = path {
+                            this.select_project(Some(path), window, cx);
+                        }
+                    }
+                    ListEvent::Cancel => {
+                        this.project_menu_open = false;
+                        this.project_trigger_focus.focus(window, cx);
+                        cx.notify();
+                    }
+                    _ => {}
+                }
+            },
+        ));
+        subscriptions.push(cx.subscribe_in(
+            &agentconfig_url_input,
+            window,
+            |this, _, event, window, cx| {
+                if matches!(event, InputEvent::PressEnter { .. }) {
+                    this.import_agentconfig_url(window, cx);
+                } else if matches!(event, InputEvent::Change) {
+                    cx.notify();
+                }
+            },
+        ));
+        subscriptions.push(cx.subscribe(
+            &agentconfig_model_select,
+            |this, _, event: &SelectEvent<Vec<SharedString>>, cx| {
+                if matches!(event, SelectEvent::Confirm(_)) {
+                    this.agentconfig_resolved_import = None;
+                    this.agentconfig_status.clear();
+                    if this
+                        .agentconfig_pending_preview
+                        .as_ref()
+                        .is_some_and(|preview| !preview.requires_password)
+                    {
+                        this.preview_agentconfig(cx);
+                    }
+                    cx.notify();
+                }
+            },
+        ));
+        subscriptions.push(cx.subscribe(
+            &agentconfig_password_input,
+            |this, _, event: &InputEvent, cx| {
+                if matches!(event, InputEvent::Change)
+                    && this
+                        .agentconfig_pending_preview
+                        .as_ref()
+                        .is_some_and(|preview| preview.requires_password)
+                {
+                    this.agentconfig_resolved_import = None;
+                    this.agentconfig_status.clear();
+                    cx.notify();
+                }
+            },
+        ));
+        subscriptions.push(cx.subscribe_in(
+            &agentconfig_password_input,
+            window,
+            |this, _, event, _, cx| {
+                if matches!(event, InputEvent::PressEnter { .. }) {
+                    this.preview_agentconfig(cx);
+                }
+            },
+        ));
+        subscriptions.push(cx.subscribe(
+            &agentconfig_backup_password_input,
+            |_, _, _: &InputEvent, cx| cx.notify(),
+        ));
         subscriptions.push(cx.subscribe_in(
             &settings_general_language,
             window,
-            |this, _, event: &SelectEvent<Vec<SharedString>>, window, cx| {
+            |this, _, event: &SelectEvent<settings::SettingsChoices>, window, cx| {
                 if let SelectEvent::Confirm(Some(value)) = event {
                     this.change_language(
                         if value.as_ref() == "中文" {
@@ -361,7 +543,7 @@ impl PiDesktopApp {
         subscriptions.push(cx.subscribe_in(
             &settings_footer_language,
             window,
-            |this, _, event: &SelectEvent<Vec<SharedString>>, window, cx| {
+            |this, _, event: &SelectEvent<settings::SettingsChoices>, window, cx| {
                 if let SelectEvent::Confirm(Some(value)) = event {
                     this.change_language(
                         if value.as_ref() == "中文" {
@@ -376,9 +558,27 @@ impl PiDesktopApp {
             },
         ));
         subscriptions.push(cx.subscribe_in(
+            &settings_engine,
+            window,
+            |this, _, event: &SelectEvent<settings::SettingsChoices>, _, cx| {
+                if let SelectEvent::Confirm(Some(value)) = event {
+                    this.change_engine(value, cx);
+                }
+            },
+        ));
+        subscriptions.push(cx.subscribe_in(
+            &settings_auth_provider,
+            window,
+            |this, _, event: &SelectEvent<settings::SettingsChoices>, _, cx| {
+                if let SelectEvent::Confirm(Some(value)) = event {
+                    this.change_auth_provider(value, cx);
+                }
+            },
+        ));
+        subscriptions.push(cx.subscribe_in(
             &settings_appearance_theme,
             window,
-            |this, _, event: &SelectEvent<Vec<SharedString>>, window, cx| {
+            |this, _, event: &SelectEvent<settings::SettingsChoices>, window, cx| {
                 if let SelectEvent::Confirm(Some(value)) = event {
                     this.change_theme(value, window, cx);
                 }
@@ -387,7 +587,7 @@ impl PiDesktopApp {
         subscriptions.push(cx.subscribe_in(
             &settings_footer_theme,
             window,
-            |this, _, event: &SelectEvent<Vec<SharedString>>, window, cx| {
+            |this, _, event: &SelectEvent<settings::SettingsChoices>, window, cx| {
                 if let SelectEvent::Confirm(Some(value)) = event {
                     this.change_theme(value, window, cx);
                 }
@@ -489,7 +689,15 @@ impl PiDesktopApp {
         subscriptions
             .push(cx.subscribe(&review_search, |_, _, _event: &InputEvent, cx| cx.notify()));
         let mut app = Self {
+            identity,
             workspace_dir,
+            project_menu,
+            project_menu_open: false,
+            project_selecting: false,
+            project_navigation_generation: 0,
+            project_error: String::new(),
+            project_trigger_focus: cx.focus_handle(),
+            project_selection: None,
             session,
             session_history,
             task_states: saved.task_states,
@@ -517,6 +725,8 @@ impl PiDesktopApp {
             workflow_controls: Default::default(),
             input_state,
             settings_general_language,
+            settings_engine,
+            settings_auth_provider,
             settings_appearance_theme,
             settings_footer_language,
             settings_footer_theme,
@@ -524,6 +734,10 @@ impl PiDesktopApp {
             settings_key_input,
             settings_model_input,
             settings_font_input,
+            agentconfig_password_input,
+            agentconfig_backup_password_input,
+            agentconfig_url_input,
+            agentconfig_model_select,
             search_input,
             skill_search_input,
             selected_nav: "chat",
@@ -541,6 +755,21 @@ impl PiDesktopApp {
             model_identifier,
             settings_saved: false,
             settings_error: String::new(),
+            agentconfig_pending_raw: None,
+            agentconfig_pending_preview: None,
+            agentconfig_resolved_import: None,
+            agentconfig_status: String::new(),
+            agentconfig_utility_status: String::new(),
+            agentconfig_backup_expanded: false,
+            agentconfig_configurations: saved.agentconfig_configurations,
+            agentconfig_pending_source: None,
+            agentconfig_source_checked_at: None,
+            agentconfig_pending_target: None,
+            agentconfig_pending_original: None,
+            agentconfig_fetch_generation: 0,
+            agentconfig_fetching: false,
+            agentconfig_fetch_abort: None,
+            agentconfig_remove_target: None,
             status_message: String::new(),
             tokens_used: 0,
             is_executing: false,
@@ -623,32 +852,61 @@ impl PiDesktopApp {
     }
 }
 fn main() {
-    if let Ok(true) = installer::handle_cli_args() {
-        return;
+    match installer::handle_cli_args() {
+        Ok(true) => return,
+        Ok(false) => {}
+        Err(error) => {
+            eprintln!("Startup command failed: {error:#}");
+            std::process::exit(1);
+        }
     }
     tracing_subscriber::fmt::init();
-    gpui_kit::application()
-        .with_assets(gpui_kit::assets::AllAssets)
-        .run(|cx| {
-            gpui_kit::init(cx);
-            interactions::bind_keys(cx);
-            let options = WindowOptions {
-                window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
-                    None,
-                    size(px(1200.), px(800.)),
-                    cx,
-                ))),
-                window_min_size: Some(size(px(480.), px(640.))),
-                titlebar: Some(TitlebarOptions {
-                    title: Some("ZCode".into()),
-                    appears_transparent: true,
-                    traffic_light_position: Some(point(px(22.), px(23.))),
-                }),
-                ..Default::default()
-            };
-            gpui_kit::open_window(options, cx, |window, cx| {
-                cx.new(|cx| PiDesktopApp::new(window, cx))
-            })
-            .expect("open workbench");
-        });
+    let identity = AppIdentity::from_environment();
+    let (url_sender, mut url_receiver) = tokio::sync::mpsc::channel(16);
+    for argument in std::env::args().skip(1) {
+        agentconfig_links::enqueue_url(&url_sender, argument);
+    }
+    let application = gpui_kit::application().with_assets(gpui_kit::assets::AllAssets);
+    application.on_open_urls(move |urls| {
+        for url in urls {
+            agentconfig_links::enqueue_url(&url_sender, url);
+        }
+    });
+    application.run(move |cx| {
+        gpui_kit::init(cx);
+        interactions::bind_keys(cx);
+        let options = WindowOptions {
+            window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
+                None,
+                size(px(1200.), px(800.)),
+                cx,
+            ))),
+            window_min_size: Some(size(px(480.), px(640.))),
+            titlebar: Some(TitlebarOptions {
+                title: Some(identity.brand_name.clone().into()),
+                appears_transparent: true,
+                traffic_light_position: Some(point(px(22.), px(23.))),
+            }),
+            ..Default::default()
+        };
+        let (window_handle, view) = gpui_kit::open_window(options, cx, |window, cx| {
+            cx.new(|cx| projects::DesktopShell::new(window, cx))
+        })
+        .expect("open workbench");
+        cx.spawn(async move |cx| {
+            while let Some(url) = url_receiver.recv().await {
+                if cx
+                    .update_window(window_handle, |_, window, cx| {
+                        view.update(cx, |this, cx| {
+                            this.receive_agentconfig_url(&url, window, cx);
+                        });
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        })
+        .detach();
+    });
 }

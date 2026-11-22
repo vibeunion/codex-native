@@ -3,11 +3,14 @@ pub mod calc;
 pub mod fs;
 pub mod office;
 pub mod search;
+mod workspace_path;
 
 use anyhow::Result;
 use async_trait::async_trait;
 use serde_json::Value;
 use std::sync::Arc;
+
+pub(crate) use workspace_path::WorkspacePath;
 
 #[async_trait]
 pub trait Tool: Send + Sync {

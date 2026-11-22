@@ -2,6 +2,9 @@ use crate::task_state::{FileChangeItem, TaskState, TurnFileChanges};
 use pi_agent_core::{Message, Role};
 use std::collections::{BTreeMap, HashMap};
 
+pub(super) mod buttons;
+pub(super) mod layout;
+
 pub(super) struct TurnSummary {
     pub turn_id: String,
     pub changes: TurnFileChanges,
@@ -162,7 +165,7 @@ mod tests {
     fn successful_writes_are_deduplicated_at_the_turn_tail_without_guessed_counts() {
         let user = Message::user("update");
         let id = user.id.clone();
-        let messages = vec![
+        let messages = [
             user,
             call("a", "write_file", "a.rs"),
             Message::tool_result("a", "write_file", "ok", false),
@@ -195,7 +198,7 @@ mod tests {
 
     #[test]
     fn explicit_observations_override_unknown_counts_and_preserve_legacy_numbers() {
-        let messages = vec![
+        let messages = [
             Message::user("update"),
             call("a", "edit_file", "a.rs"),
             Message::tool_result("a", "edit_file", "ok", false),

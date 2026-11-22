@@ -94,6 +94,11 @@ pub fn is_running_installed() -> bool {
     cur_str == target_str
 }
 
+#[cfg(windows)]
+pub fn register_agentconfig_protocol() -> Result<()> {
+    register_windows_agentconfig_protocol(&std::env::current_exe()?)
+}
+
 /// Handle CLI flags (--install, --uninstall, --portable, --status).
 /// Returns Ok(true) if the installer handled the command and the application should exit.
 /// Returns Ok(false) if normal application execution should continue.
@@ -132,7 +137,20 @@ pub fn handle_cli_args() -> Result<bool> {
         "--install" | "-i" | "/install" => {
             let create_desktop = !args.iter().any(|a| a == "--no-desktop");
             install(create_desktop)?;
+            #[cfg(windows)]
+            if args.iter().any(|a| a == "--register-agentconfig") {
+                register_windows_agentconfig_protocol(&InstallInfo::new()?.executable_path)?;
+            }
             Ok(true)
+        }
+        "--register-agentconfig" => {
+            #[cfg(windows)]
+            {
+                register_agentconfig_protocol()?;
+                Ok(true)
+            }
+            #[cfg(not(windows))]
+            anyhow::bail!("Use the app's AgentConfig settings to register links on this platform")
         }
         "--uninstall" | "-u" | "/uninstall" => {
             uninstall()?;
@@ -178,6 +196,9 @@ fn print_help() {
     println!("Options:");
     println!("  --install, -i          Perform Windows self-installation (copy exe, create shortcuts, add PATH)");
     println!("  --no-desktop           When installing, do not create a Desktop shortcut");
+    println!(
+        "  --register-agentconfig Register this executable for AgentConfig links (Windows; opt-in)"
+    );
     println!("  --uninstall, -u        Cleanly uninstall Volt from Windows (remove files, shortcuts, registry)");
     println!("  --portable, -p         Run in portable mode without installation checks");
     println!("  --install-status       Show current installation status");
@@ -325,6 +346,7 @@ pub fn uninstall() -> Result<()> {
         // 4. Remove Registry key
         println!("正在注销 Windows 卸载项...");
         unregister_windows_uninstall()?;
+        unregister_windows_agentconfig_protocol(&info.executable_path)?;
 
         // 5. Schedule deletion of install directory
         println!("正在清理程序文件与目录...");

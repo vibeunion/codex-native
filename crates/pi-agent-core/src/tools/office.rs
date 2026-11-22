@@ -8,7 +8,7 @@ use std::fs::File;
 use std::io::{Cursor, Read};
 use std::path::{Path, PathBuf};
 
-use super::Tool;
+use super::{Tool, WorkspacePath};
 
 // ============================================================================
 // 1. HIGH-PERFORMANCE TABLE & CSV ENGINE
@@ -41,9 +41,12 @@ impl TableData {
         let mut current_row = Vec::new();
         let mut current_field = String::new();
         let mut in_quotes = false;
+        let mut quote_closed = false;
+        let mut record_started = false;
         let mut chars = content.chars().peekable();
 
         while let Some(ch) = chars.next() {
+            record_started = true;
             if in_quotes {
                 if ch == '"' {
                     if chars.peek() == Some(&'"') {
@@ -52,27 +55,32 @@ impl TableData {
                         current_field.push('"');
                     } else {
                         in_quotes = false;
+                        quote_closed = true;
                     }
                 } else {
                     current_field.push(ch);
                 }
             } else {
                 if ch == '"' {
+                    if !current_field.is_empty() || quote_closed {
+                        bail!("Unexpected quote in an unquoted CSV field");
+                    }
                     in_quotes = true;
                 } else if ch == delimiter {
-                    current_row.push(current_field.trim().to_string());
-                    current_field = String::new();
+                    current_row.push(std::mem::take(&mut current_field));
+                    quote_closed = false;
                 } else if ch == '\n' || ch == '\r' {
                     if ch == '\r' && chars.peek() == Some(&'\n') {
                         chars.next();
                     }
-                    current_row.push(current_field.trim().to_string());
-                    current_field = String::new();
-                    if !current_row.iter().all(|s| s.is_empty()) {
-                        rows.push(current_row);
-                    }
-                    current_row = Vec::new();
+                    current_row.push(std::mem::take(&mut current_field));
+                    rows.push(std::mem::take(&mut current_row));
+                    record_started = false;
+                    quote_closed = false;
                 } else {
+                    if quote_closed {
+                        bail!("Unexpected character after a closing CSV quote");
+                    }
                     current_field.push(ch);
                 }
             }
@@ -81,11 +89,9 @@ impl TableData {
         if in_quotes {
             bail!("Unterminated quoted CSV field");
         }
-        if !current_field.is_empty() || !current_row.is_empty() {
-            current_row.push(current_field.trim().to_string());
-            if !current_row.iter().all(|s| s.is_empty()) {
-                rows.push(current_row);
-            }
+        if record_started {
+            current_row.push(current_field);
+            rows.push(current_row);
         }
 
         if rows.is_empty() {
@@ -143,14 +149,24 @@ impl TableData {
             return String::new();
         }
 
-        let col_count = self.headers.len();
+        let headers: Vec<String> = self
+            .headers
+            .iter()
+            .map(|cell| markdown_cell(cell))
+            .collect();
+        let rows: Vec<Vec<String>> = self
+            .rows
+            .iter()
+            .map(|row| row.iter().map(|cell| markdown_cell(cell)).collect())
+            .collect();
+        let col_count = headers.len();
         let mut col_widths = vec![3; col_count];
 
-        for (i, h) in self.headers.iter().enumerate() {
+        for (i, h) in headers.iter().enumerate() {
             col_widths[i] = col_widths[i].max(unicode_width(h));
         }
 
-        for row in &self.rows {
+        for row in &rows {
             for (i, cell) in row.iter().enumerate() {
                 if i < col_count {
                     col_widths[i] = col_widths[i].max(unicode_width(cell));
@@ -162,7 +178,7 @@ impl TableData {
 
         // Header row
         out.push_str("| ");
-        for (i, h) in self.headers.iter().enumerate() {
+        for (i, h) in headers.iter().enumerate() {
             out.push_str(h);
             out.push_str(&" ".repeat(col_widths[i].saturating_sub(unicode_width(h))));
             out.push_str(" | ");
@@ -180,7 +196,7 @@ impl TableData {
         out.push('\n');
 
         // Data rows
-        for row in &self.rows {
+        for row in &rows {
             out.push_str("| ");
             for (i, width) in col_widths.iter().enumerate().take(col_count) {
                 let cell = row.get(i).map(|s| s.as_str()).unwrap_or("");
@@ -199,23 +215,32 @@ impl TableData {
         let lines: Vec<&str> = md
             .lines()
             .map(|l| l.trim())
-            .filter(|l| l.starts_with('|') && l.ends_with('|'))
+            .filter(|l| l.starts_with('|'))
             .collect();
         if lines.len() < 2 {
             bail!("Markdown table must contain at least a header row and a separator line");
         }
 
-        let split_cells = |line: &str| -> Vec<String> {
-            let inner = &line[1..line.len() - 1];
-            inner.split('|').map(|s| s.trim().to_string()).collect()
-        };
-
-        let headers = split_cells(lines[0]);
-        let mut rows = Vec::new();
-
-        // Skip separator line at index 1
-        for line in &lines[2..] {
-            rows.push(split_cells(line));
+        let headers = markdown_row(lines[0])?;
+        let separators = markdown_row(lines[1])?;
+        if separators.len() != headers.len()
+            || !separators.iter().all(|cell| markdown_separator(cell))
+        {
+            bail!("Invalid Markdown table separator");
+        }
+        let rows = lines[2..]
+            .iter()
+            .map(|line| markdown_row(line))
+            .collect::<Result<Vec<_>>>()?;
+        for (index, row) in rows.iter().enumerate() {
+            if row.len() != headers.len() {
+                bail!(
+                    "Markdown row {} has {} cells; expected {}",
+                    index + 3,
+                    row.len(),
+                    headers.len()
+                );
+            }
         }
 
         Ok(Self { headers, rows })
@@ -438,6 +463,119 @@ fn unicode_width(s: &str) -> usize {
     s.chars().map(|c| if c as u32 > 0x7f { 2 } else { 1 }).sum()
 }
 
+fn markdown_cell(cell: &str) -> String {
+    let content_start = cell.len() - cell.trim_start().len();
+    let content_end = cell.trim_end().len();
+    let mut escaped = String::new();
+    for (index, ch) in cell.char_indices() {
+        match ch {
+            '\\' => escaped.push_str("\\\\"),
+            '|' => escaped.push_str("\\|"),
+            '\n' => escaped.push_str("<br>"),
+            '\r' => escaped.push_str("&#13;"),
+            '\t' => escaped.push_str("&#9;"),
+            '&' => escaped.push_str("&amp;"),
+            '<' => escaped.push_str("&lt;"),
+            '>' => escaped.push_str("&gt;"),
+            ch if ch.is_whitespace() && (index < content_start || index >= content_end) => {
+                escaped.push_str(&format!("&#{};", ch as u32));
+            }
+            _ => escaped.push(ch),
+        }
+    }
+    escaped
+}
+
+fn markdown_row(line: &str) -> Result<Vec<String>> {
+    let inner = line
+        .strip_prefix('|')
+        .and_then(|inner| inner.strip_suffix('|'))
+        .ok_or_else(|| anyhow!("Markdown rows require opening and closing pipes"))?;
+    let trailing_backslashes = inner
+        .bytes()
+        .rev()
+        .take_while(|byte| *byte == b'\\')
+        .count();
+    if trailing_backslashes % 2 == 1 {
+        bail!("Markdown rows require an unescaped closing pipe");
+    }
+    let mut cells = Vec::new();
+    let mut cell = String::new();
+    let mut chars = inner.chars().peekable();
+    while let Some(ch) = chars.next() {
+        match ch {
+            '\\' if matches!(chars.peek(), Some('\\' | '|')) => cell.push(chars.next().unwrap()),
+            '|' => cells.push(markdown_cell_text(&std::mem::take(&mut cell))),
+            _ => cell.push(ch),
+        }
+    }
+    cells.push(markdown_cell_text(&cell));
+    Ok(cells)
+}
+
+fn markdown_separator(cell: &str) -> bool {
+    let cell = cell.strip_prefix(':').unwrap_or(cell);
+    let cell = cell.strip_suffix(':').unwrap_or(cell);
+    cell.len() >= 3 && cell.chars().all(|ch| ch == '-')
+}
+
+fn markdown_cell_text(cell: &str) -> String {
+    let with_breaks = cell
+        .trim()
+        .replace("<br>", "\n")
+        .replace("<br/>", "\n")
+        .replace("<br />", "\n");
+    let mut remaining = with_breaks.as_str();
+    let mut decoded = String::new();
+    while let Some(ch) = remaining.chars().next() {
+        if let Some((character, bytes)) = character_reference(remaining) {
+            decoded.push(character);
+            remaining = &remaining[bytes..];
+        } else {
+            decoded.push(ch);
+            remaining = &remaining[ch.len_utf8()..];
+        }
+    }
+    decoded
+}
+
+fn character_reference(text: &str) -> Option<(char, usize)> {
+    let entity = text.strip_prefix('&')?.split_once(';')?.0;
+    let character = match entity {
+        "amp" => '&',
+        "lt" => '<',
+        "gt" => '>',
+        "quot" => '"',
+        "apos" => '\'',
+        _ => {
+            let number = if let Some(hex) = entity.strip_prefix("#x") {
+                u32::from_str_radix(hex, 16).ok()?
+            } else {
+                entity.strip_prefix('#')?.parse().ok()?
+            };
+            char::from_u32(number)?
+        }
+    };
+    Some((character, entity.len() + 2))
+}
+
+fn decode_xml_text(mut remaining: &str) -> Result<String> {
+    let mut decoded = String::new();
+    while let Some(start) = remaining.find('&') {
+        decoded.push_str(&remaining[..start]);
+        remaining = &remaining[start..];
+        let (character, bytes) = character_reference(remaining)
+            .filter(|(character, _)| {
+                matches!(*character as u32, 9 | 10 | 13 | 0x20..=0xD7FF | 0xE000..=0xFFFD | 0x10000..=0x10FFFF)
+            })
+            .ok_or_else(|| anyhow!("Invalid XML character reference in DOCX text"))?;
+        decoded.push(character);
+        remaining = &remaining[bytes..];
+    }
+    decoded.push_str(remaining);
+    Ok(decoded)
+}
+
 // ============================================================================
 // 2. PURE RUST DOCX & ZIP EXTRACTOR
 // ============================================================================
@@ -457,8 +595,8 @@ impl DocxReader {
         let xml_content = Self::extract_zip_entry(bytes, "word/document.xml").ok_or_else(|| {
             anyhow!("Invalid DOCX archive: 'word/document.xml' not found in package")
         })?;
-        let xml_str = String::from_utf8_lossy(&xml_content);
-        Ok(Self::parse_word_document_xml(&xml_str))
+        let xml_str = String::from_utf8(xml_content).context("DOCX document XML is not UTF-8")?;
+        Self::parse_word_document_xml(&xml_str)
     }
 
     /// Extract a file entry from ZIP byte stream in pure Rust
@@ -518,7 +656,7 @@ impl DocxReader {
     }
 
     /// Fast XML tag parsing to extract structured paragraphs and tables
-    fn parse_word_document_xml(xml: &str) -> String {
+    fn parse_word_document_xml(xml: &str) -> Result<String> {
         let mut out = String::new();
         let mut current_tag = String::new();
         let mut current_text = String::new();
@@ -566,7 +704,7 @@ impl DocxReader {
             out.push('\n');
         }
 
-        out
+        decode_xml_text(&out)
     }
 
     pub fn compute_doc_stats(text: &str) -> Value {
@@ -600,7 +738,10 @@ impl SlidesGenerator {
         topic: &str,
         num_slides: usize,
         author: Option<&str>,
-    ) -> String {
+    ) -> Result<String> {
+        if !(3..=100).contains(&num_slides) {
+            bail!("Number of slides must be between 3 and 100");
+        }
         let mut out = String::new();
 
         // Frontmatter
@@ -656,8 +797,7 @@ impl SlidesGenerator {
             ),
         ];
 
-        let target_slides = num_slides.max(3);
-        for i in 0..(target_slides - 2) {
+        for i in 0..(num_slides - 3) {
             let (sec_title, subtitle, bullets) = topics[i % topics.len()];
             out.push_str(&format!("## {}\n\n", sec_title));
             out.push_str(&format!("*{}: 关键要点解析*\n\n", subtitle));
@@ -674,9 +814,13 @@ impl SlidesGenerator {
         // Final Slide: Q&A
         out.push_str("# 谢谢倾听 / Q&A\n\n");
         out.push_str("欢迎提问与深入探讨！\n\n");
-        out.push_str("*Powered by Volt Native AI Desktop*\n");
+        let identity = crate::AppIdentity::from_environment();
+        out.push_str(&format!(
+            "*Powered by {} - {}*\n",
+            identity.brand_name, identity.description
+        ));
 
-        out
+        Ok(out)
     }
 }
 
@@ -804,14 +948,41 @@ fn optional_argument<T: serde::de::DeserializeOwned>(
         .transpose()
 }
 
+fn table_delimiter(arguments: &Value) -> Result<char> {
+    if let Some(delimiter) = optional_argument::<String>(arguments, "delimiter")? {
+        let mut chars = delimiter.chars();
+        let delimiter = chars
+            .next()
+            .filter(|ch| !matches!(ch, '"' | '\n' | '\r'))
+            .ok_or_else(|| {
+                anyhow!("Delimiter must be one character other than quote or newline")
+            })?;
+        if chars.next().is_some() {
+            bail!("Delimiter must be exactly one character");
+        }
+        return Ok(delimiter);
+    }
+    let extension = arguments["file_path"]
+        .as_str()
+        .and_then(|path| Path::new(path).extension())
+        .and_then(|extension| extension.to_str());
+    Ok(
+        if extension.is_some_and(|extension| extension.eq_ignore_ascii_case("tsv")) {
+            '\t'
+        } else {
+            ','
+        },
+    )
+}
+
 pub struct OfficeTool {
-    pub workspace_dir: PathBuf,
+    workspace: WorkspacePath,
 }
 
 impl OfficeTool {
     pub fn new(workspace_dir: impl Into<PathBuf>) -> Self {
         Self {
-            workspace_dir: workspace_dir.into(),
+            workspace: WorkspacePath::new(workspace_dir),
         }
     }
 }
@@ -870,7 +1041,7 @@ impl Tool for OfficeTool {
                 "target_col": { "type": "string", "description": "Target column name for 'table_stats'" },
                 "title": { "type": "string", "description": "Title for slide deck or report" },
                 "topic": { "type": "string", "description": "Topic or subtitle for slides/report" },
-                "num_slides": { "type": "integer", "description": "Number of slides to generate (default 5)" },
+                "num_slides": { "type": "integer", "minimum": 3, "maximum": 100, "default": 5, "description": "Total number of slides, including title, agenda and Q&A (3 to 100, default 5)" },
                 "labels": {
                     "type": "array",
                     "items": { "type": "string" },
@@ -892,17 +1063,13 @@ impl Tool for OfficeTool {
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow!("Missing 'action' parameter"))?;
 
-        let delimiter = arguments
-            .get("delimiter")
-            .and_then(|v| v.as_str())
-            .and_then(|s| s.chars().next())
-            .unwrap_or(',');
+        let delimiter = table_delimiter(&arguments)?;
 
         let load_table = || -> Result<TableData> {
             if let Some(content) = arguments.get("content").and_then(|v| v.as_str()) {
                 TableData::parse_csv(content, delimiter)
             } else if let Some(path_str) = arguments.get("file_path").and_then(|v| v.as_str()) {
-                let path = self.workspace_dir.join(path_str);
+                let path = self.workspace.existing(path_str)?;
                 let text = std::fs::read_to_string(&path)
                     .with_context(|| format!("Failed to read file: {}", path.display()))?;
                 TableData::parse_csv(&text, delimiter)
@@ -947,7 +1114,7 @@ impl Tool for OfficeTool {
                 let md_text = if let Some(c) = arguments.get("content").and_then(|v| v.as_str()) {
                     c.to_string()
                 } else if let Some(path_str) = arguments.get("file_path").and_then(|v| v.as_str()) {
-                    let path = self.workspace_dir.join(path_str);
+                    let path = self.workspace.existing(path_str)?;
                     std::fs::read_to_string(&path)?
                 } else {
                     bail!("Missing 'content' or 'file_path'")
@@ -969,7 +1136,7 @@ impl Tool for OfficeTool {
                     .get("file_path")
                     .and_then(|v| v.as_str())
                     .ok_or_else(|| anyhow!("Missing 'file_path' for docx_read"))?;
-                let path = self.workspace_dir.join(path_str);
+                let path = self.workspace.existing(path_str)?;
                 let text = DocxReader::extract_text_from_file(&path)?;
                 Ok(format!(
                     "📄 Extracted text from DOCX ({}):\n\n{}",
@@ -979,7 +1146,7 @@ impl Tool for OfficeTool {
             "docx_stats" => {
                 let text =
                     if let Some(path_str) = arguments.get("file_path").and_then(|v| v.as_str()) {
-                        let path = self.workspace_dir.join(path_str);
+                        let path = self.workspace.existing(path_str)?;
                         if path.extension().and_then(|s| s.to_str()) == Some("docx") {
                             DocxReader::extract_text_from_file(&path)?
                         } else {
@@ -1005,17 +1172,13 @@ impl Tool for OfficeTool {
                     .get("topic")
                     .and_then(|v| v.as_str())
                     .unwrap_or("面向高绩效交付的工程赋能");
-                let num_slides = arguments
-                    .get("num_slides")
-                    .and_then(|v| v.as_u64())
-                    .map(|n| n as usize)
-                    .unwrap_or(5);
+                let num_slides = optional_argument(&arguments, "num_slides")?.unwrap_or(5);
                 let slides_md = SlidesGenerator::generate_markdown_slides(
                     title,
                     topic,
                     num_slides,
-                    Some("Volt Native Agent"),
-                );
+                    Some(crate::AppIdentity::from_environment().agent_name.as_str()),
+                )?;
                 Ok(slides_md)
             }
             "chart_bar" => {

@@ -1,8 +1,10 @@
 use super::*;
 use crate::workbench::{action, heading, icon_button};
+use gpui::StatefulInteractiveElement;
 use gpui_kit::assets::IconName as Glyph;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::prelude::FluentBuilder;
+mod queue;
 
 pub(super) const REVIEW_SIDE_PANE_WIDTH: Pixels = px(380.);
 pub(super) const REVIEW_SINGLE_COLUMN_BREAKPOINT: Pixels = px(1180.);
@@ -22,20 +24,6 @@ pub(super) enum CommandDrawerState {
     Empty,
     Running,
     Ready,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum QueuePanelStatus {
-    Paused,
-    Active(usize),
-}
-
-pub(super) fn queue_panel_status(paused: bool, count: usize) -> QueuePanelStatus {
-    if paused {
-        QueuePanelStatus::Paused
-    } else {
-        QueuePanelStatus::Active(count)
-    }
 }
 
 /// Below this width Review replaces the conversation instead of sharing the row.
@@ -637,106 +625,58 @@ impl PiDesktopApp {
         } else {
             crate::workbench::conversation_composer_width(content_width)
         };
-        div()
+        queue::wrapper(empty)
             .id("pending-queue")
-            .w_full()
-            .px_4()
-            .pb_2()
-            .h_flex()
-            .justify_center()
+            .role(Role::Group)
+            .aria_label(format!(
+                "{} · {queue_len}",
+                self.tr("待发送队列", "Queued prompts")
+            ))
             .child(
-                div()
-                    .w_full()
-                    .max_w(target_width)
-                    .v_flex()
-                    .gap_2()
-                    .p_3()
-                    .rounded(px(12.))
-                    .border_1()
-                    .border_color(rgba(colors.settings_border))
-                    .bg(rgb(colors.dock_bg))
-                    .shadow_xs()
-                    .child(
-                        div()
-                            .h_flex()
-                            .items_center()
-                            .justify_between()
-                            .gap_2()
-                            .child(
-                                div()
-                                    .h_flex()
-                                    .items_center()
-                                    .gap_2()
+                queue::column(target_width, empty).child(
+                    queue::surface(self.ui_text(14.), colors)
+                        .when(paused || self.run_error.is_some(), queue::standalone)
+                        .when(paused, |surface| {
+                            surface.child(
+                                queue::paused_banner(colors)
+                                    .child(queue::paused_message(
+                                        self.tr("队列已暂停", "Queue paused"),
+                                    ))
                                     .child(
-                                        Icon::new(if paused {
-                                            Glyph::Pause
-                                        } else {
-                                            Glyph::ListOrdered
-                                        })
-                                        .size(px(14.))
-                                        .text_color(rgba(colors.foreground_subtle)),
-                                    )
-                                    .child(
-                                        div()
-                                            .text_size(px(12.))
-                                            .font_medium()
-                                            .text_color(rgba(colors.foreground_subtle))
-                                            .child(match queue_panel_status(paused, queue_len) {
-                                                QueuePanelStatus::Paused => self
-                                                    .tr("队列已暂停", "Queue paused")
-                                                    .to_string(),
-                                                QueuePanelStatus::Active(count) => {
-                                                    format!(
-                                                        "{} · {}",
-                                                        self.tr("待发送队列", "Queued prompts"),
-                                                        count
-                                                    )
-                                                }
-                                            }),
-                                    ),
-                            )
-                            .when(paused, |header| {
-                                header.child(
-                                    action("queue-resume", self.tr("继续", "Resume"), Glyph::Play)
-                                        .disabled(self.is_executing)
+                                        queue::resume_button(
+                                            self.tr("继续", "Resume"),
+                                            self.ui_text(14.),
+                                            colors,
+                                            self.is_executing,
+                                            cx,
+                                        )
                                         .on_click(
                                             cx.listener(|this, _, _, cx| this.resume_queue(cx)),
                                         ),
-                                )
-                            }),
-                    )
-                    .child(
-                        div()
-                            .id("pending-queue-items")
-                            .v_flex()
-                            .gap_1()
-                            .max_h(px(140.))
-                            .overflow_y_scroll()
-                            .children(state.queue.into_iter().enumerate().map(
+                                    ),
+                            )
+                        })
+                        .child(
+                            queue::items().children(state.queue.into_iter().enumerate().map(
                                 |(index, prompt)| {
-                                    div()
-                                        .h_flex()
-                                        .items_center()
-                                        .gap_2()
-                                        .px_3()
-                                        .py_2()
-                                        .rounded(px(8.))
-                                        .border_1()
-                                        .border_color(rgba(colors.card_border))
-                                        .bg(rgba(colors.card_user_bg))
+                                    let full_prompt = prompt.clone();
+                                    queue::row(colors)
                                         .child(
-                                            div()
-                                                .flex_1()
-                                                .min_w_0()
-                                                .truncate()
-                                                .text_size(px(14.))
+                                            queue::prompt_label()
+                                                .id(("queue-prompt", index))
+                                                .tooltip(move |window, cx| {
+                                                    tooltip::Tooltip::new(full_prompt.clone())
+                                                        .build(window, cx)
+                                                })
                                                 .child(prompt),
                                         )
                                         .child(
-                                            icon_button(
+                                            queue::item_button(
                                                 format!("queue-edit-{index}"),
                                                 self.tr("编辑", "Edit"),
-                                                Glyph::SquarePen,
+                                                Glyph::Pencil,
+                                                colors,
+                                                cx,
                                             )
                                             .on_click(
                                                 cx.listener(move |this, _, window, cx| {
@@ -764,10 +704,12 @@ impl PiDesktopApp {
                                             ),
                                         )
                                         .child(
-                                            icon_button(
+                                            queue::item_button(
                                                 format!("queue-remove-{index}"),
                                                 self.tr("移除", "Remove"),
-                                                Glyph::X,
+                                                Glyph::Trash,
+                                                colors,
+                                                cx,
                                             )
                                             .on_click(
                                                 cx.listener(move |this, _, _, cx| {
@@ -783,7 +725,8 @@ impl PiDesktopApp {
                                         )
                                 },
                             )),
-                    ),
+                        ),
+                ),
             )
             .into_any_element()
     }
@@ -797,6 +740,11 @@ impl PiDesktopApp {
         let kind = pane.kind.clone();
         let content = pane.content.clone();
         let view_mode = self.artifact_view_mode;
+        let mode_label = if view_mode == ArtifactViewMode::Preview {
+            self.tr("源码", "Source")
+        } else {
+            self.tr("预览", "Preview")
+        };
         let is_web = matches!(
             kind.to_lowercase().as_str(),
             "html" | "html5" | "canvas" | "svg" | "web"
@@ -842,19 +790,12 @@ impl PiDesktopApp {
                     .gap_1()
                     .child(
                         Button::new("artifact-toggle-mode")
+                            .accessibility_label(mode_label)
                             .h(px(26.))
                             .rounded(px(6.))
                             .px_2()
                             .ghost()
-                            .child(
-                                div()
-                                    .text_size(self.ui_text(11.))
-                                    .child(if view_mode == ArtifactViewMode::Preview {
-                                        self.tr("源码", "Source")
-                                    } else {
-                                        self.tr("预览", "Preview")
-                                    }),
-                            )
+                            .child(div().text_size(self.ui_text(11.)).child(mode_label))
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.artifact_view_mode = match this.artifact_view_mode {
                                     ArtifactViewMode::Preview => ArtifactViewMode::Code,
@@ -865,9 +806,9 @@ impl PiDesktopApp {
                     )
                     .when(is_web, |actions| {
                         let content_c = content.clone();
-                        let title_c = title.clone();
                         actions.child(
                             Button::new("artifact-open-web-win")
+                                .accessibility_label(self.tr("浏览器预览", "Browser Preview"))
                                 .h(px(26.))
                                 .rounded(px(6.))
                                 .px_2()
@@ -875,44 +816,21 @@ impl PiDesktopApp {
                                 .child(
                                     div()
                                         .text_size(self.ui_text(11.))
-                                        .child(self.tr("Web视窗", "Web Window")),
+                                        .child(self.tr("浏览器预览", "Browser Preview")),
                                 )
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    let temp_dir = std::env::temp_dir();
-                                    let file_path = temp_dir.join("volt_artifact_web.html");
-                                    let is_dark = this.theme_preference == crate::theme::ThemePreference::Dark;
-                                    let host_colors = if is_dark {
-                                        ThemeColors::dark()
-                                    } else {
-                                        ThemeColors::light()
-                                    };
-                                    let themed_html = crate::generative_ui::inject_theme_variables_to_html(
-                                        &content_c, is_dark, &host_colors,
-                                    );
-                                    if std::fs::write(&file_path, &themed_html).is_ok() {
-                                        #[cfg(target_os = "macos")]
-                                        let _ = std::process::Command::new("open").arg(&file_path).spawn();
-                                        #[cfg(target_os = "windows")]
-                                        let _ = std::process::Command::new("cmd").args(["/c", "start", file_path.to_str().unwrap()]).spawn();
-                                        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-                                        let _ = std::process::Command::new("xdg-open").arg(&file_path).spawn();
-                                        this.status_message = format!("已在独立 Web 视窗中打开【{}】", title_c);
-                                        cx.notify();
-                                    }
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    this.open_html_preview(&content_c, window, cx);
                                 })),
                         )
                     })
                     .child(
                         Button::new("artifact-close-btn")
+                            .accessibility_label(self.tr("关闭产物预览", "Close artifact preview"))
                             .h(px(26.))
                             .rounded(px(6.))
                             .px_2()
                             .ghost()
-                            .child(
-                                div()
-                                    .text_size(self.ui_text(12.))
-                                    .child("✕"),
-                            )
+                            .child(div().text_size(self.ui_text(12.)).child("✕"))
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.artifact_visible = false;
                                 cx.notify();
@@ -923,7 +841,6 @@ impl PiDesktopApp {
         let body = match view_mode {
             ArtifactViewMode::Preview => {
                 let content_c = content.clone();
-                let title_c = title.clone();
                 div()
                     .flex_1()
                     .p_3()
@@ -949,7 +866,7 @@ impl PiDesktopApp {
                                             .text_size(self.ui_text(13.))
                                             .font_semibold()
                                             .text_color(rgb(colors.text_primary))
-                                            .child(self.tr("Web / HTML5 沙箱", "Web / HTML5 Sandbox")),
+                                            .child(self.tr("HTML 预览", "HTML Preview")),
                                     )
                                     .child(
                                         div()
@@ -959,7 +876,7 @@ impl PiDesktopApp {
                                             .bg(rgba(colors.accent_green & 0x00ffffff | 0x20000000))
                                             .text_size(self.ui_text(11.))
                                             .text_color(rgb(colors.accent_green))
-                                            .child(self.tr("沙箱就绪", "Ready")),
+                                            .child("HTML5"),
                                     ),
                             )
                             .child(
@@ -967,13 +884,20 @@ impl PiDesktopApp {
                                     .text_size(self.ui_text(12.))
                                     .text_color(rgba(colors.foreground_subtle))
                                     .child(format!(
-                                        "{}，大小 {} 字节。点击下方按钮即可在独立 GPU 硬件加速 Web 视窗中执行 HTML5、WebGL 与 Canvas。",
+                                        "{} · {} bytes. {}",
                                         kind.to_uppercase(),
-                                        content.len()
+                                        content.len(),
+                                        self.tr(
+                                            "点击下方按钮，请求在默认浏览器中打开。",
+                                            "Use the button below to request opening in the default browser.",
+                                        )
                                     )),
                             )
                             .child(
                                 Button::new("artifact-launch-btn")
+                                    .accessibility_label(
+                                        self.tr("在默认浏览器中打开", "Open in Default Browser"),
+                                    )
                                     .h(px(30.))
                                     .rounded(px(6.))
                                     .secondary()
@@ -981,31 +905,11 @@ impl PiDesktopApp {
                                         div()
                                             .text_size(self.ui_text(12.))
                                             .font_medium()
-                                            .child(self.tr("🌐 启动独立 Web 视窗运行", "🌐 Launch in Independent Web Window")),
+                                            .child(self.tr("在默认浏览器中打开", "Open in Default Browser")),
                                     )
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                    let temp_dir = std::env::temp_dir();
-                                    let file_path = temp_dir.join("volt_artifact_web.html");
-                                    let is_dark = this.theme_preference == crate::theme::ThemePreference::Dark;
-                                    let host_colors = if is_dark {
-                                        ThemeColors::dark()
-                                    } else {
-                                        ThemeColors::light()
-                                    };
-                                    let themed_html = crate::generative_ui::inject_theme_variables_to_html(
-                                        &content_c, is_dark, &host_colors,
-                                    );
-                                    if std::fs::write(&file_path, &themed_html).is_ok() {
-                                        #[cfg(target_os = "macos")]
-                                        let _ = std::process::Command::new("open").arg(&file_path).spawn();
-                                        #[cfg(target_os = "windows")]
-                                        let _ = std::process::Command::new("cmd").args(["/c", "start", file_path.to_str().unwrap()]).spawn();
-                                        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-                                        let _ = std::process::Command::new("xdg-open").arg(&file_path).spawn();
-                                        this.status_message = format!("已在独立 Web 视窗中启动【{}】", title_c);
-                                        cx.notify();
-                                    }
-                                })),
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        this.open_html_preview(&content_c, window, cx);
+                                    })),
                             ),
                     )
                     .child(
@@ -1040,35 +944,29 @@ impl PiDesktopApp {
                             .p_3()
                             .h_flex()
                             .gap(px(12.))
-                            .child(
-                                div()
-                                    .v_flex()
-                                    .items_end()
-                                    .children((1..=line_count).map(|line_no| {
-                                        div()
-                                            .text_size(self.ui_text(11.))
-                                            .font_family(".AppleSystemUIFontMonospaced")
-                                            .text_color(rgba(colors.foreground_subtlest))
-                                            .child(format!("{}", line_no))
-                                    })),
-                            )
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .v_flex()
-                                    .children(lines.into_iter().map(|line| {
-                                        let text = if line.is_empty() {
-                                            " ".to_string()
-                                        } else {
-                                            line
-                                        };
-                                        div()
-                                            .text_size(self.ui_text(11.))
-                                            .font_family(".AppleSystemUIFontMonospaced")
-                                            .text_color(rgb(colors.text_primary))
-                                            .child(text)
-                                    })),
-                            ),
+                            .child(div().v_flex().items_end().children((1..=line_count).map(
+                                |line_no| {
+                                    div()
+                                        .text_size(self.ui_text(11.))
+                                        .font_family(".AppleSystemUIFontMonospaced")
+                                        .text_color(rgba(colors.foreground_subtlest))
+                                        .child(format!("{}", line_no))
+                                },
+                            )))
+                            .child(div().flex_1().v_flex().children(lines.into_iter().map(
+                                |line| {
+                                    let text = if line.is_empty() {
+                                        " ".to_string()
+                                    } else {
+                                        line
+                                    };
+                                    div()
+                                        .text_size(self.ui_text(11.))
+                                        .font_family(".AppleSystemUIFontMonospaced")
+                                        .text_color(rgb(colors.text_primary))
+                                        .child(text)
+                                },
+                            ))),
                     )
                     .child(
                         div()
@@ -1156,17 +1054,5 @@ mod layout_tests {
         );
         assert_eq!(command_drawer_state(true, true), CommandDrawerState::Ready);
         assert_eq!(command_drawer_state(true, false), CommandDrawerState::Ready);
-    }
-
-    #[test]
-    fn queue_panel_distinguishes_paused_and_active_count() {
-        assert_eq!(
-            super::queue_panel_status(true, 5),
-            super::QueuePanelStatus::Paused
-        );
-        assert_eq!(
-            super::queue_panel_status(false, 3),
-            super::QueuePanelStatus::Active(3)
-        );
     }
 }

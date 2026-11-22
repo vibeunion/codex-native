@@ -6,7 +6,8 @@ use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{Icon, Selectable, Sizable, StyledExt};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::{
-    div, px, rgb, rgba, App, Div, ElementId, InteractiveElement, ParentElement, Pixels, Styled,
+    div, px, relative, rgb, rgba, App, Div, ElementId, InteractiveElement, ParentElement, Pixels,
+    Styled,
 };
 
 fn action_content(label: &'static str, icon: Glyph, icon_size: Pixels, font_size: Pixels) -> Div {
@@ -16,26 +17,31 @@ fn action_content(label: &'static str, icon: Glyph, icon_size: Pixels, font_size
         .justify_center()
         .gap(px(4.))
         .text_size(font_size)
-        .line_height(px(20.))
+        .line_height(relative(1.5))
         .font_normal()
         .whitespace_nowrap()
         .child(Icon::new(icon).size(icon_size).flex_shrink_0())
         .child(label)
 }
 
+fn action_frame(button: Button, radius: Pixels) -> Button {
+    // Explicit style radii let the padding-box fill share the native button frame.
+    Styled::rounded(button.border_1().border_color(rgba(0x00000000)), radius)
+}
+
 /// Form actions size to their content; navigation rows deliberately fill theirs.
 pub(super) fn save_button(label: &'static str, font_size: Pixels) -> Button {
-    Button::new("save-settings")
-        .primary()
-        .large()
-        .h(px(32.))
-        .px(px(10.))
-        .border_1()
-        .border_color(rgba(0x00000000))
-        .rounded(px(8.))
-        .self_start()
-        .child(action_content(label, Glyph::Check, px(16.), font_size))
-        .accessibility_label(label)
+    action_frame(
+        Button::new("save-settings")
+            .primary()
+            .large()
+            .h(px(32.))
+            .px(px(10.)),
+        px(8.),
+    )
+    .self_start()
+    .child(action_content(label, Glyph::Check, px(16.), font_size))
+    .accessibility_label(label)
 }
 
 pub(super) fn secondary_button(
@@ -44,16 +50,12 @@ pub(super) fn secondary_button(
     icon: Glyph,
     font_size: Pixels,
 ) -> Button {
-    Button::new(id)
-        .ghost()
-        .small()
-        .h(px(28.))
-        .px(px(8.))
-        .border_1()
-        .border_color(rgba(0x00000000))
-        .rounded(px(6.))
-        .child(action_content(label, icon, px(14.), font_size))
-        .accessibility_label(label)
+    action_frame(
+        Button::new(id).ghost().small().h(px(28.)).px(px(8.)),
+        px(6.),
+    )
+    .child(action_content(label, icon, px(14.), font_size))
+    .accessibility_label(label)
 }
 
 fn api_key_visibility_label(masked: bool, language: Language) -> &'static str {
@@ -75,21 +77,21 @@ fn native_tooltip(mut button: Button, label: &'static str) -> Button {
 
 pub(super) fn api_key_visibility_button(masked: bool, language: Language) -> Button {
     let label = api_key_visibility_label(masked, language);
-    let button = Button::new("settings-key-visibility")
-        .ghost()
-        .small()
-        .w(px(24.))
-        .h(px(24.))
-        .p_0()
-        .border_1()
-        .border_color(rgba(0x00000000))
-        .rounded(px(6.))
-        .child(
-            Icon::new(if masked { Glyph::Eye } else { Glyph::EyeOff })
-                .size(px(14.))
-                .flex_shrink_0(),
-        )
-        .accessibility_label(label);
+    let button = action_frame(
+        Button::new("settings-key-visibility")
+            .ghost()
+            .small()
+            .w(px(24.))
+            .h(px(24.))
+            .p_0(),
+        px(6.),
+    )
+    .child(
+        Icon::new(if masked { Glyph::Eye } else { Glyph::EyeOff })
+            .size(px(14.))
+            .flex_shrink_0(),
+    )
+    .accessibility_label(label);
     native_tooltip(button, label)
 }
 
@@ -200,7 +202,9 @@ mod tests {
     use crate::Language;
     use gpui_kit::assets::IconName as Glyph;
     use gpui_kit::component::button::Button;
-    use gpui_kit::{px, rgba, FontWeight, JustifyContent, Styled};
+    use gpui_kit::{
+        px, relative, rgba, AlignItems, FontWeight, JustifyContent, Styled, WhiteSpace,
+    };
 
     #[test]
     fn command_frames_reserve_the_reference_one_pixel_transparent_border() {
@@ -252,22 +256,26 @@ mod tests {
     }
 
     #[test]
-    fn action_content_centers_interface_text_without_a_full_width_navigation_row() {
-        for font_size in [12., 14., 20.] {
+    fn action_content_scales_line_height_without_changing_centering_or_content_width() {
+        for font_size in 12..=20 {
+            let font_size = px(font_size as f32);
             for (label, icon, icon_size) in [
                 ("保存配置", Glyph::Check, 16.),
                 ("Save Preferences", Glyph::Check, 16.),
                 ("用于任务", Glyph::Plus, 14.),
                 ("Use in task", Glyph::Plus, 14.),
             ] {
-                let mut content = action_content(label, icon, px(icon_size), px(font_size));
+                let mut content = action_content(label, icon, px(icon_size), font_size);
                 let style = content.style();
                 assert!(style.size.width.is_none());
+                assert!(style.size.height.is_none());
+                assert_eq!(style.align_items, Some(AlignItems::Center));
                 assert_eq!(style.justify_content, Some(JustifyContent::Center));
                 assert_eq!(style.gap.width, Some(px(4.).into()));
-                assert_eq!(style.text.font_size, Some(px(font_size).into()));
+                assert_eq!(style.text.font_size, Some(font_size.into()));
                 assert_eq!(style.text.font_weight, Some(FontWeight::NORMAL));
-                assert_eq!(style.text.line_height, Some(px(20.).into()));
+                assert_eq!(style.text.line_height, Some(relative(1.5)));
+                assert_eq!(style.text.white_space, Some(WhiteSpace::Nowrap));
             }
         }
     }

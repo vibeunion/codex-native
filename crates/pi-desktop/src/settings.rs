@@ -5,6 +5,7 @@ use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::Input;
 use gpui_kit::component::select::Select;
 use gpui_kit::prelude::FluentBuilder;
+mod agentconfig;
 mod buttons;
 mod command_motion;
 mod field_motion;
@@ -19,14 +20,17 @@ use buttons::{
 use command_motion::{CommandKind, SettingsCommand};
 use field_motion::SettingsField;
 use select_motion::SettingsSelect;
+pub(super) use select_motion::{settings_choices, SettingsChoices};
 
 /// Application-owned geometry with the library's native switch semantics.
+type AppearanceChangeHandler = Box<dyn Fn(&bool, &mut Window, &mut App)>;
+
 #[derive(IntoElement)]
 struct AppearanceSwitch {
     checked: bool,
     reduced_motion: bool,
     label: SharedString,
-    on_change: Box<dyn Fn(&bool, &mut Window, &mut App)>,
+    on_change: AppearanceChangeHandler,
 }
 
 impl RenderOnce for AppearanceSwitch {
@@ -119,12 +123,75 @@ pub(super) fn theme_index(theme: ThemePreference) -> usize {
     }
 }
 
+pub(super) fn engine_labels(language: Language) -> Vec<SharedString> {
+    let mut labels = Vec::with_capacity(2);
+    #[cfg(feature = "codex-harness")]
+    labels.push(match language {
+        Language::Chinese => "Codex Harness（默认）".into(),
+        Language::English => "Codex Harness (default)".into(),
+    });
+    #[cfg(feature = "pi-native")]
+    labels.push(match language {
+        Language::Chinese => "Pi 自由模式".into(),
+        Language::English => "Pi native".into(),
+    });
+    labels
+}
+
+pub(super) fn engine_switch_available() -> bool {
+    cfg!(all(feature = "codex-harness", feature = "pi-native"))
+}
+
+pub(super) fn engine_index(engine: pi_agent_core::EngineKind) -> usize {
+    match engine {
+        pi_agent_core::EngineKind::CodexCompatible => 0,
+        pi_agent_core::EngineKind::PiNative => {
+            usize::from(cfg!(all(feature = "codex-harness", feature = "pi-native")))
+        }
+    }
+}
+
+pub(super) const ACCOUNT_OAUTH_LABEL: &str = "ZCode OAuth";
+
+pub(super) fn auth_provider_labels(language: Language) -> Vec<SharedString> {
+    match language {
+        Language::Chinese => vec![
+            "API Key".into(),
+            "ChatGPT OAuth".into(),
+            "DeepSeek OAuth".into(),
+            ACCOUNT_OAUTH_LABEL.into(),
+            "Native OAuth".into(),
+            "自定义 OAuth".into(),
+        ],
+        Language::English => vec![
+            "API key".into(),
+            "ChatGPT OAuth".into(),
+            "DeepSeek OAuth".into(),
+            ACCOUNT_OAUTH_LABEL.into(),
+            "Native OAuth".into(),
+            "Custom OAuth".into(),
+        ],
+    }
+}
+
+pub(super) fn auth_provider_index(provider: Option<pi_agent_core::auth::AuthProvider>) -> usize {
+    match provider {
+        None => 0,
+        Some(pi_agent_core::auth::AuthProvider::ChatGpt) => 1,
+        Some(pi_agent_core::auth::AuthProvider::DeepSeek) => 2,
+        Some(pi_agent_core::auth::AuthProvider::Provider) => 3,
+        Some(pi_agent_core::auth::AuthProvider::Pi) => 4,
+        Some(pi_agent_core::auth::AuthProvider::Custom) => 5,
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub(super) enum Section {
     #[default]
     General,
     Appearance,
     Providers,
+    AgentConfig,
     AgentCapabilities,
     Subagents,
     Skills,
@@ -138,6 +205,7 @@ impl Section {
             Self::General => "general",
             Self::Appearance => "appearance",
             Self::Providers => "providers",
+            Self::AgentConfig => "agentconfig",
             Self::AgentCapabilities => "agent-capabilities",
             Self::Subagents => "subagents",
             Self::Skills => "skills",
@@ -151,6 +219,7 @@ impl Section {
             (Self::General, Language::Chinese) => "常规",
             (Self::Appearance, Language::Chinese) => "外观",
             (Self::Providers, Language::Chinese) => "模型服务",
+            (Self::AgentConfig, Language::Chinese) => "AgentConfig",
             (Self::AgentCapabilities, Language::Chinese) => "智能体能力",
             (Self::Subagents, Language::Chinese) => "子代理",
             (Self::Skills, Language::Chinese) => "技能",
@@ -159,6 +228,7 @@ impl Section {
             (Self::General, _) => "General",
             (Self::Appearance, _) => "Appearance",
             (Self::Providers, _) => "Model providers",
+            (Self::AgentConfig, _) => "AgentConfig",
             (Self::AgentCapabilities, _) => "Agent capabilities",
             (Self::Subagents, _) => "Subagents",
             (Self::Skills, _) => "Skills",
@@ -172,6 +242,7 @@ impl Section {
             Self::General => Glyph::Settings2,
             Self::Appearance => Glyph::Palette,
             Self::Providers => Glyph::Package,
+            Self::AgentConfig => Glyph::FileKey,
             Self::AgentCapabilities => Glyph::Package,
             Self::Subagents => Glyph::Bot,
             Self::Skills => Glyph::WandSparkles,
@@ -192,6 +263,7 @@ pub(super) fn settings_nav_groups() -> [(&'static str, &'static [Section]); 3] {
                 Section::General,
                 Section::Appearance,
                 Section::Providers,
+                Section::AgentConfig,
                 Section::Shortcuts,
             ],
         ),
@@ -204,10 +276,11 @@ pub(super) fn section_from_key(key: Option<&str>) -> Section {
     match key {
         Some("appearance") => Section::Appearance,
         Some("providers") => Section::Providers,
+        Some("agentconfig") => Section::AgentConfig,
         Some("agent-capabilities") => Section::AgentCapabilities,
         Some("subagents") => Section::Subagents,
         Some("skills") => Section::Skills,
-        // Automations is a primary workbench surface in ZCode, not a settings tab.
+        // Automations is a primary workbench surface in Pi Desktop, not a settings tab.
         // Migrate older persisted selections to the capabilities landing page.
         Some("automations") => Section::AgentCapabilities,
         Some("shortcuts") => Section::Shortcuts,
@@ -216,7 +289,7 @@ pub(super) fn section_from_key(key: Option<&str>) -> Section {
     }
 }
 
-/// ZCode `w-28`: the px suffix sits inside the field, and the value is right-aligned.
+/// Pi Desktop `w-28`: the px suffix sits inside the field, and the value is right-aligned.
 const INTERFACE_FONT_FIELD_WIDTH: Pixels = px(112.);
 const INTERFACE_FONT_FIELD_HEIGHT: Pixels = px(28.);
 
@@ -251,7 +324,7 @@ fn interface_font_unit(font_size: Pixels, c: &ThemeColors) -> Div {
 }
 
 fn settings_title(label: &'static str, compact: bool, font_size: Pixels) -> Div {
-    // ZCode title tokens add a fixed offset; they do not multiply the UI scale.
+    // Pi Desktop title tokens add a fixed offset; they do not multiply the UI scale.
     div()
         .w_full()
         .min_w_0()
@@ -266,7 +339,7 @@ fn settings_group_label(label: &'static str, font_size: Pixels, c: &ThemeColors)
     div()
         .min_w_0()
         .px(px(10.))
-        .pb_1()
+        .pb(px(4.))
         .text_size(font_size - px(2.))
         .line_height(relative(1.5))
         .text_color(rgb(c.remote_foreground_muted))
@@ -290,6 +363,7 @@ fn settings_frame(font_size: Pixels, c: &ThemeColors) -> Div {
         .min_h_0()
         .bg(rgb(c.sidebar_bg))
         .text_size(font_size)
+        .line_height(relative(1.5))
 }
 
 fn settings_save_row() -> Div {
@@ -298,6 +372,7 @@ fn settings_save_row() -> Div {
         .min_w_0()
         .min_h(px(32.))
         .flex_shrink_0()
+        .pt(px(4.))
         .h_flex()
         .flex_wrap()
         .items_center()
@@ -328,45 +403,46 @@ fn card(c: &ThemeColors) -> Div {
         .bg(rgb(c.card_bg))
 }
 
-fn setting_row_frame(narrow: bool) -> Div {
+fn setting_row_frame(stacked: bool) -> Div {
+    // Reference spacing stays fixed; GPUI rem spacing follows the UI font size.
     div()
         .h_flex()
         .w_full()
         .min_w_0()
         .items_center()
         .justify_between()
-        .gap_4()
-        .px_4()
-        .py_3()
-        .when(narrow, |row| row.v_flex().items_start())
+        .gap(px(16.))
+        .px(px(16.))
+        .py(px(12.))
+        .when(stacked, |row| row.v_flex().items_start())
 }
 
-fn setting_control_frame(narrow: bool) -> Div {
+fn setting_control_frame(stacked: bool) -> Div {
     div()
         .min_w_0()
         .flex_shrink_0()
         .h_flex()
         .items_center()
         .justify_end()
-        .when(narrow, |control| control.w_full())
-        .when(!narrow, |control| control.w(px(192.)))
+        .when(stacked, |control| control.w_full())
+        .when(!stacked, |control| control.w(px(192.)))
 }
 
 fn setting_row(
     label: impl Into<SharedString>,
     description: impl Into<SharedString>,
     control: AnyElement,
-    narrow: bool,
+    stacked: bool,
     c: &ThemeColors,
 ) -> Div {
-    setting_row_frame(narrow)
+    setting_row_frame(stacked)
         .child(
             div()
                 .v_flex()
-                .gap_1()
+                .gap(px(4.))
                 .min_w_0()
-                .when(narrow, |text| text.w_full())
-                .when(!narrow, |text| text.flex_1())
+                .when(stacked, |text| text.w_full())
+                .when(!stacked, |text| text.flex_1())
                 .child(div().font_medium().child(label.into()))
                 .child(
                     div()
@@ -375,7 +451,7 @@ fn setting_row(
                         .child(description.into()),
                 ),
         )
-        .child(setting_control_frame(narrow).child(control))
+        .child(setting_control_frame(stacked).child(control))
 }
 
 fn settings_input<T: Styled>(control: T, height: Pixels, font_size: Pixels, c: &ThemeColors) -> T {
@@ -390,7 +466,7 @@ fn settings_input<T: Styled>(control: T, height: Pixels, font_size: Pixels, c: &
         .border_color(rgba(c.settings_border))
         .bg(rgb(c.dock_bg))
         .text_size(font_size)
-        .line_height(px(20.))
+        .line_height(relative(1.5))
 }
 
 fn settings_select<T: Styled>(control: T, font_size: Pixels, c: &ThemeColors) -> T {
@@ -447,10 +523,10 @@ fn shortcut_row_frame(narrow: bool) -> Div {
         .items_center()
         .justify_between()
         .min_w_0()
-        .gap_3()
-        .px_4()
-        .py_3()
-        .when(narrow, |row| row.v_flex().items_start().gap_2())
+        .gap(px(12.))
+        .px(px(16.))
+        .py(px(12.))
+        .when(narrow, |row| row.v_flex().items_start().gap(px(8.)))
 }
 
 fn shortcut_key_group() -> Div {
@@ -463,6 +539,14 @@ fn shortcut_key_group() -> Div {
         .gap(px(4.))
 }
 
+fn provider_field_label(label: &'static str, label_size: Pixels, c: &ThemeColors) -> Div {
+    div()
+        .text_size(label_size)
+        .line_height(relative(1.5))
+        .text_color(rgba(c.foreground_subtle))
+        .child(label)
+}
+
 fn provider_field(
     label: &'static str,
     label_size: Pixels,
@@ -472,13 +556,7 @@ fn provider_field(
     div()
         .v_flex()
         .gap(px(4.))
-        .child(
-            div()
-                .text_size(label_size)
-                .line_height(px(20.))
-                .text_color(rgba(c.foreground_subtle))
-                .child(label),
-        )
+        .child(provider_field_label(label, label_size, c))
         .child(control)
 }
 
@@ -499,24 +577,28 @@ impl PiDesktopApp {
             .bg(rgb(c.sidebar_bg))
             .child(div().h(px(48.)))
             .child(
-                div().px_2().pt_3().pb_3().child(SettingsCommand::new(
-                    "settings-back",
-                    settings_back_button(
-                        self.tr("返回", "Back"),
-                        compact,
-                        self.ui_text(14.),
+                div()
+                    .px(px(8.))
+                    .pt(px(12.))
+                    .pb(px(12.))
+                    .child(SettingsCommand::new(
+                        "settings-back",
+                        settings_back_button(
+                            self.tr("返回", "Back"),
+                            compact,
+                            self.ui_text(14.),
+                            c,
+                            cx,
+                        )
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.show_settings = false;
+                            this.focus_composer(window, cx);
+                            cx.notify();
+                        })),
+                        CommandKind::Back,
                         c,
-                        cx,
-                    )
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.show_settings = false;
-                        this.focus_composer(window, cx);
-                        cx.notify();
-                    })),
-                    CommandKind::Back,
-                    c,
-                    self.preferences.reduced_motion,
-                )),
+                        self.preferences.reduced_motion,
+                    )),
             );
         let mut nav_items = div()
             .id("settings-nav")
@@ -524,9 +606,9 @@ impl PiDesktopApp {
             .flex_1()
             .min_h_0()
             .overflow_y_scroll()
-            .px_2()
-            .pb_3()
-            .gap_4();
+            .px(px(8.))
+            .pb(px(12.))
+            .gap(px(16.));
         let groups = settings_nav_groups();
         let mut index = 0usize;
         for (group_index, (group_id, sections)) in groups.into_iter().enumerate() {
@@ -535,15 +617,16 @@ impl PiDesktopApp {
                 "agent-capabilities" => self.tr("智能体能力", "Agent capabilities"),
                 _ => self.tr("数据与统计", "Data & stats"),
             };
-            let mut group_view = div()
-                .v_flex()
-                .gap_1()
-                .when(compact && group_index > 0, |group| {
-                    group
-                        .border_t(px(1.))
-                        .border_color(rgba(c.settings_border))
-                        .pt_3()
-                });
+            let mut group_view =
+                div()
+                    .v_flex()
+                    .gap(px(4.))
+                    .when(compact && group_index > 0, |group| {
+                        group
+                            .border_t(px(1.))
+                            .border_color(rgba(c.settings_border))
+                            .pt(px(12.))
+                    });
             if !compact {
                 group_view =
                     group_view.child(settings_group_label(group_label, self.ui_text(14.), c));
@@ -588,9 +671,10 @@ impl PiDesktopApp {
         }
         let content_inset = if cfg!(target_os = "windows") { 6. } else { 4. };
         let content = match self.settings_section {
-            Section::General => self.general_settings(narrow, c, cx),
-            Section::Appearance => self.appearance_settings(narrow, c, cx),
+            Section::General => self.general_settings(c, cx),
+            Section::Appearance => self.appearance_settings(c, cx),
             Section::Providers => self.provider_settings(c, cx),
+            Section::AgentConfig => self.agentconfig_settings(c, cx),
             Section::Shortcuts => self.shortcut_settings(window, c, cx),
             Section::AgentCapabilities => self.agent_capabilities_settings(narrow, c),
             Section::Subagents => self.subagents_settings(narrow, c),
@@ -636,7 +720,7 @@ impl PiDesktopApp {
                                             .max_w(px(896.))
                                             .px(px(if compact { 16. } else { 32. }))
                                             .pb(px(if compact { 32. } else { 40. }))
-                                            .gap_8()
+                                            .gap(px(32.))
                                             .child(settings_title(
                                                 self.settings_section.label(self.language),
                                                 compact,
@@ -694,12 +778,7 @@ impl PiDesktopApp {
             .into_any_element()
     }
 
-    fn general_settings(
-        &self,
-        narrow: bool,
-        c: &ThemeColors,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
+    fn general_settings(&self, c: &ThemeColors, cx: &mut Context<Self>) -> AnyElement {
         card(c)
             .child(setting_row(
                 self.tr("界面语言", "Interface language"),
@@ -722,7 +801,8 @@ impl PiDesktopApp {
                 )
                 .w_full()
                 .into_any_element(),
-                narrow,
+                // The reference default row retains its 192px column below sm.
+                false,
                 c,
             ))
             .when(cfg!(target_os = "windows"), |view| {
@@ -755,18 +835,18 @@ impl PiDesktopApp {
             .flex_shrink_0()
             .border_t_1()
             .border_color(rgba(c.settings_border))
-            .px_3()
-            .pt_3()
-            .pb_4()
+            .px(px(12.))
+            .pt(px(12.))
+            .pb(px(16.))
             .v_flex()
-            .gap_2()
+            .gap(px(8.))
             .child(
                 settings_caption(self.tr("界面", "Interface"), self.ui_text(14.), c).font_medium(),
             )
             .child(
                 div()
                     .h_flex()
-                    .gap_2()
+                    .gap(px(8.))
                     .child(
                         SettingsSelect::new(
                             "settings-footer-language",
@@ -811,7 +891,7 @@ impl PiDesktopApp {
         let masked = self.settings_key_input.read(cx).presentation().is_masked();
         div()
             .v_flex()
-            .gap_4()
+            .gap(px(16.))
             .child(
                 div()
                     .text_size(label_size)
@@ -822,10 +902,120 @@ impl PiDesktopApp {
                         "Configure the custom model service for this session. Changes apply after saving.",
                     )),
             )
+            .when(engine_switch_available(), |view| {
+                view.child(setting_row(
+                    self.tr("运行引擎", "Agent engine"),
+                    self.tr(
+                        "Codex Harness 默认负责桌面端会话语义；Pi 自由模式提供更开放的工具和策略。",
+                        "Codex Harness is the default desktop runtime; Pi mode exposes a more open runtime.",
+                    ),
+                    SettingsSelect::new(
+                        "settings-engine",
+                        settings_select(
+                            Select::new(&self.settings_engine),
+                            self.ui_text(14.),
+                            c,
+                        )
+                        .w_full()
+                        .focus_ring(false)
+                        .accessibility_label(self.tr("运行引擎", "Agent engine")),
+                        c,
+                        self.preferences.reduced_motion,
+                    )
+                    .w_full()
+                    .into_any_element(),
+                    false,
+                    c,
+                ))
+            })
+            .child(setting_row(
+                self.tr("登录方式", "Authentication"),
+                self.tr(
+                    "选择 API Key 或 OAuth 提供方。",
+                    "Select an API key or an OAuth provider.",
+                ),
+                SettingsSelect::new(
+                    "settings-auth-provider",
+                    settings_select(
+                        Select::new(&self.settings_auth_provider),
+                        self.ui_text(14.),
+                        c,
+                    )
+                    .w_full()
+                    .focus_ring(false)
+                    .accessibility_label(self.tr("登录方式", "Authentication")),
+                    c,
+                    self.preferences.reduced_motion,
+                )
+                .w_full()
+                .into_any_element(),
+                false,
+                c,
+            ))
+            .child(setting_row(
+                self.tr("OAuth 登录", "OAuth login"),
+                if self.preferences.auth_provider == Some(pi_agent_core::auth::AuthProvider::Provider) {
+                    self.tr(
+                        "账户授权。模型调用仍需单独配置 GLM Coding Plan API Key。",
+                        "Account authorization. Model requests still require a GLM Coding Plan API key.",
+                    )
+                } else {
+                    self.tr("在浏览器中完成授权。", "Complete authorization in your browser.")
+                },
+                settings_secondary_button(
+                    "start-oauth-login",
+                    self.tr("打开登录", "Open login"),
+                    Glyph::LogIn,
+                    self.ui_text(14.),
+                )
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.start_oauth_login(cx);
+                }))
+                .into_any_element(),
+                false,
+                c,
+            ))
+            .child(setting_row(
+                self.tr("Codex 会话", "Codex sessions"),
+                self.tr(
+                    "导入已有 Codex 会话，或把当前会话导出为兼容 JSON。",
+                    "Import an existing Codex session or export the current session as compatible JSON.",
+                ),
+                div()
+                    .h_flex()
+                    .items_center()
+                    .justify_end()
+                    .gap(px(8.))
+                    .child(
+                        settings_secondary_button(
+                            "import-codex-session",
+                            self.tr("导入", "Import"),
+                            Glyph::Upload,
+                            self.ui_text(14.),
+                        )
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.import_codex_session(window, cx);
+                        })),
+                    )
+                    .child(
+                        settings_secondary_button(
+                            "export-codex-session",
+                            self.tr("导出", "Export"),
+                            Glyph::Download,
+                            self.ui_text(14.),
+                        )
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.export_codex_session(window, cx);
+                        })),
+                    )
+                    .into_any_element(),
+                false,
+                c,
+            ))
             .child(
                 card(c)
-                    .p_4()
-                    .gap_3()
+                    .p(px(16.))
+                    .gap(px(12.))
                     .child(provider_field(
                         base_label,
                         label_size,
@@ -924,19 +1114,14 @@ impl PiDesktopApp {
             .into_any_element()
     }
 
-    fn appearance_settings(
-        &self,
-        narrow: bool,
-        c: &ThemeColors,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
+    fn appearance_settings(&self, c: &ThemeColors, cx: &mut Context<Self>) -> AnyElement {
         div()
             .v_flex()
-            .gap_3()
+            .gap(px(12.))
             .child(
                 div()
                     .v_flex()
-                    .gap_1()
+                    .gap(px(4.))
                     .child(
                         div()
                             .text_size(self.ui_text(14.) + px(2.))
@@ -977,7 +1162,7 @@ impl PiDesktopApp {
                         )
                         .w_full()
                         .into_any_element(),
-                        narrow,
+                        false,
                         c,
                     ))
                     .child(div().h(px(1.)).bg(rgba(c.settings_border)))
@@ -1003,7 +1188,7 @@ impl PiDesktopApp {
                             )
                             .child(interface_font_unit(self.ui_text(14.), c))
                             .into_any_element(),
-                        narrow,
+                        false,
                         c,
                     ))
                     .child(div().h(px(1.)).bg(rgba(c.settings_border)))
@@ -1024,7 +1209,7 @@ impl PiDesktopApp {
                             })),
                         }
                         .into_any_element(),
-                        narrow,
+                        false,
                         c,
                     )),
             )
@@ -1119,7 +1304,7 @@ impl PiDesktopApp {
         let count = skills.len();
         div()
             .v_flex()
-            .gap_4()
+            .gap(px(16.))
             .child(
                 div()
                     .h(px(28.))
@@ -1169,9 +1354,9 @@ impl PiDesktopApp {
                             .h_flex()
                             .items_center()
                             .min_w_0()
-                            .gap_3()
-                            .px_4()
-                            .py_3()
+                            .gap(px(12.))
+                            .px(px(16.))
+                            .py(px(12.))
                             .when(index > 0, |row| {
                                 row.border_t_1()
                                     .border_color(rgba(c.settings_border).alpha(0.05))
@@ -1284,7 +1469,7 @@ impl PiDesktopApp {
         ];
         div()
             .v_flex()
-            .gap_5()
+            .gap(px(20.))
             .child(
                 div()
                     .text_size(self.ui_text(14.))
@@ -1443,8 +1628,8 @@ fn usage_strip(
                     div()
                         .flex_1()
                         .min_w_0()
-                        .px_4()
-                        .py_3()
+                        .px(px(16.))
+                        .py(px(12.))
                         .v_flex()
                         .items_center()
                         .child(
@@ -1459,7 +1644,7 @@ fn usage_strip(
                         .child(
                             div()
                                 .w_full()
-                                .mt_1()
+                                .mt(px(4.))
                                 .truncate()
                                 .text_center()
                                 .text_size(label_size)
@@ -1473,9 +1658,10 @@ fn usage_strip(
 #[cfg(test)]
 mod tests {
     use super::{
-        card, interface_font_frame, interface_font_input, interface_font_unit, local_usage,
-        section_from_key, session_tool_calls, setting_control_frame, setting_row_frame,
-        settings_caption, settings_frame, settings_group_label, settings_input,
+        card, engine_index, engine_labels, engine_switch_available, interface_font_frame,
+        interface_font_input, interface_font_unit, local_usage, provider_field,
+        provider_field_label, section_from_key, session_tool_calls, setting_control_frame,
+        setting_row_frame, settings_caption, settings_frame, settings_group_label, settings_input,
         settings_nav_button, settings_nav_content, settings_nav_groups, settings_save_button,
         settings_save_feedback, settings_save_row, settings_select, settings_title,
         shortcut_key_group, shortcut_keycap, shortcut_row_frame, theme_index, theme_labels, Glyph,
@@ -1483,10 +1669,27 @@ mod tests {
         INTERFACE_FONT_FIELD_HEIGHT, INTERFACE_FONT_FIELD_WIDTH,
     };
     use gpui_kit::{
-        px, relative, rems, rgb, rgba, AlignItems, AlignSelf, FlexDirection, FlexWrap, FontWeight,
+        px, relative, rgb, rgba, AlignItems, AlignSelf, FlexDirection, FlexWrap, FontWeight,
         JustifyContent, Overflow, Position, Styled, TextAlign, WhiteSpace,
     };
     use std::collections::HashMap;
+
+    #[test]
+    fn engine_options_follow_the_compiled_runtime_set() {
+        let labels = engine_labels(Language::English);
+        let expected =
+            usize::from(cfg!(feature = "codex-harness")) + usize::from(cfg!(feature = "pi-native"));
+        assert_eq!(labels.len(), expected);
+        assert_eq!(
+            engine_switch_available(),
+            cfg!(all(feature = "codex-harness", feature = "pi-native"))
+        );
+        assert_eq!(engine_index(pi_agent_core::EngineKind::CodexCompatible), 0);
+        assert_eq!(
+            engine_index(pi_agent_core::EngineKind::PiNative),
+            usize::from(cfg!(all(feature = "codex-harness", feature = "pi-native")))
+        );
+    }
 
     #[test]
     fn save_feedback_row_wraps_without_stretching_or_framing_the_action() {
@@ -1499,6 +1702,7 @@ mod tests {
         assert_eq!(style.min_size.width, Some(px(0.).into()));
         assert_eq!(style.min_size.height, Some(px(32.).into()));
         assert!(style.size.height.is_none());
+        assert_eq!(style.padding.top, Some(px(4.).into()));
         assert_eq!(style.gap.width, Some(px(12.).into()));
         assert_eq!(style.gap.height, Some(px(8.).into()));
         assert!(style.background.is_none());
@@ -1523,7 +1727,7 @@ mod tests {
                     assert_eq!(style.max_size.width, Some(relative(1.).into()));
                     assert!(style.size.height.is_none());
                     assert_eq!(style.text.font_size, Some(px(font_size).into()));
-                    assert_eq!(style.text.line_height, Some(relative(1.5).into()));
+                    assert_eq!(style.text.line_height, Some(relative(1.5)));
                     assert_eq!(style.text.color, Some(rgb(colors.accent_green).into()));
                     assert!(style.text.white_space.is_none());
                     assert!(style.background.is_none());
@@ -1533,13 +1737,13 @@ mod tests {
     }
 
     #[test]
-    fn settings_rows_stack_in_narrow_windows_without_a_fixed_height() {
-        for narrow in [false, true] {
-            let mut row = setting_row_frame(narrow);
+    fn settings_rows_stack_only_when_explicitly_requested_without_a_fixed_height() {
+        for stacked in [false, true] {
+            let mut row = setting_row_frame(stacked);
             let style = row.style();
             assert_eq!(
                 style.flex_direction,
-                Some(if narrow {
+                Some(if stacked {
                     FlexDirection::Column
                 } else {
                     FlexDirection::Row
@@ -1547,7 +1751,7 @@ mod tests {
             );
             assert_eq!(
                 style.align_items,
-                Some(if narrow {
+                Some(if stacked {
                     AlignItems::FlexStart
                 } else {
                     AlignItems::Center
@@ -1556,23 +1760,68 @@ mod tests {
             assert_eq!(style.size.width, Some(relative(1.).into()));
             assert_eq!(style.min_size.width, Some(px(0.).into()));
             assert!(style.size.height.is_none());
-            assert_eq!(style.gap.width, Some(rems(1.).into()));
-            assert_eq!(style.gap.height, Some(rems(1.).into()));
-            assert_eq!(style.padding.left, Some(rems(1.).into()));
-            assert_eq!(style.padding.right, Some(rems(1.).into()));
-            assert_eq!(style.padding.top, Some(rems(0.75).into()));
-            assert_eq!(style.padding.bottom, Some(rems(0.75).into()));
+            assert_eq!(style.gap.width, Some(px(16.).into()));
+            assert_eq!(style.gap.height, Some(px(16.).into()));
+            assert_eq!(style.padding.left, Some(px(16.).into()));
+            assert_eq!(style.padding.right, Some(px(16.).into()));
+            assert_eq!(style.padding.top, Some(px(12.).into()));
+            assert_eq!(style.padding.bottom, Some(px(12.).into()));
         }
     }
 
     #[test]
-    fn settings_controls_fill_narrow_rows_and_keep_the_wide_reference_column() {
-        for narrow in [false, true] {
-            let mut control = setting_control_frame(narrow);
+    fn settings_spacing_resolves_to_fixed_pixels_at_every_interface_size() {
+        for font_size in 12..=20 {
+            let rem_size = px(font_size as f32);
+            for colors in [ThemeColors::light(), ThemeColors::dark()] {
+                for (mut frame, horizontal, vertical, padding) in [
+                    (setting_row_frame(false), 16., 16., Some((16., 12.))),
+                    (setting_row_frame(true), 16., 16., Some((16., 12.))),
+                    (shortcut_row_frame(false), 12., 12., Some((16., 12.))),
+                    (shortcut_row_frame(true), 8., 8., Some((16., 12.))),
+                    (settings_save_row(), 12., 8., None),
+                    (
+                        provider_field("Base URL", rem_size, gpui_kit::div(), &colors),
+                        4.,
+                        4.,
+                        None,
+                    ),
+                ] {
+                    let style = frame.style();
+                    let resolve = |length: Option<gpui_kit::DefiniteLength>| {
+                        length.unwrap().to_pixels(px(800.).into(), rem_size)
+                    };
+                    assert_eq!(resolve(style.gap.width), px(horizontal));
+                    assert_eq!(resolve(style.gap.height), px(vertical));
+                    if let Some((inline, block)) = padding {
+                        assert_eq!(resolve(style.padding.left), px(inline));
+                        assert_eq!(resolve(style.padding.right), px(inline));
+                        assert_eq!(resolve(style.padding.top), px(block));
+                        assert_eq!(resolve(style.padding.bottom), px(block));
+                    }
+                }
+                let mut label = settings_group_label("Basics", rem_size, &colors);
+                assert_eq!(
+                    label
+                        .style()
+                        .padding
+                        .bottom
+                        .unwrap()
+                        .to_pixels(px(800.).into(), rem_size),
+                    px(4.)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn settings_controls_keep_the_reference_column_unless_explicitly_stacked() {
+        for stacked in [false, true] {
+            let mut control = setting_control_frame(stacked);
             let style = control.style();
             assert_eq!(
                 style.size.width,
-                Some(if narrow {
+                Some(if stacked {
                     relative(1.).into()
                 } else {
                     px(192.).into()
@@ -1689,11 +1938,11 @@ mod tests {
             assert_eq!(style.justify_content, Some(JustifyContent::SpaceBetween));
             assert_eq!(style.min_size.width, Some(px(0.).into()));
             assert!(style.size.height.is_none());
-            assert_eq!(style.padding.left, Some(rems(1.).into()));
-            assert_eq!(style.padding.right, Some(rems(1.).into()));
-            assert_eq!(style.padding.top, Some(rems(0.75).into()));
-            assert_eq!(style.padding.bottom, Some(rems(0.75).into()));
-            let gap = Some(rems(if narrow { 0.5 } else { 0.75 }).into());
+            assert_eq!(style.padding.left, Some(px(16.).into()));
+            assert_eq!(style.padding.right, Some(px(16.).into()));
+            assert_eq!(style.padding.top, Some(px(12.).into()));
+            assert_eq!(style.padding.bottom, Some(px(12.).into()));
+            let gap = Some(px(if narrow { 8. } else { 12. }).into());
             assert_eq!(style.gap.width, gap);
             assert_eq!(style.gap.height, gap);
         }
@@ -1716,7 +1965,8 @@ mod tests {
     #[test]
     fn settings_selects_keep_reference_insets_without_squeezing_the_text_row() {
         for colors in [ThemeColors::light(), ThemeColors::dark()] {
-            for font_size in [12., 14., 20.] {
+            for font_size in 12..=20 {
+                let font_size = font_size as f32;
                 let mut control = settings_select(gpui_kit::div(), px(font_size), &colors);
                 let style = control.style();
                 assert_eq!(style.size.height, Some(px(32.).into()));
@@ -1727,7 +1977,7 @@ mod tests {
                 assert_eq!(style.padding.top, Some(px(0.).into()));
                 assert_eq!(style.padding.bottom, Some(px(0.).into()));
                 assert_eq!(style.text.font_size, Some(px(font_size).into()));
-                assert_eq!(style.text.line_height, Some(px(20.).into()));
+                assert_eq!(style.text.line_height, Some(relative(1.5)));
                 assert_eq!(style.background, Some(rgb(colors.dock_bg).into()));
                 assert_eq!(
                     style.border_color,
@@ -1741,7 +1991,8 @@ mod tests {
     fn single_line_settings_inputs_store_height_in_the_rendered_style() {
         for colors in [ThemeColors::light(), ThemeColors::dark()] {
             for height in [32., 36.] {
-                for font_size in [12., 14., 20.] {
+                for font_size in 12..=20 {
+                    let font_size = font_size as f32;
                     let mut control =
                         settings_input(gpui_kit::div(), px(height), px(font_size), &colors);
                     let style = control.style();
@@ -1752,7 +2003,7 @@ mod tests {
                     assert_eq!(style.padding.top, Some(px(0.).into()));
                     assert_eq!(style.padding.bottom, Some(px(0.).into()));
                     assert_eq!(style.text.font_size, Some(px(font_size).into()));
-                    assert_eq!(style.text.line_height, Some(px(20.).into()));
+                    assert_eq!(style.text.line_height, Some(relative(1.5)));
                     assert_eq!(style.background, Some(rgb(colors.dock_bg).into()));
                     assert_eq!(
                         style.border_color,
@@ -1764,12 +2015,36 @@ mod tests {
     }
 
     #[test]
-    fn settings_frame_scopes_the_inherited_interface_font_to_its_own_surface() {
+    fn provider_labels_follow_interface_line_height_without_fixing_their_frame() {
         for colors in [ThemeColors::light(), ThemeColors::dark()] {
-            for font_size in [12., 14., 20.] {
+            for font_size in 12..=20 {
+                for label in ["Base URL", "API Key", "模型", "Model"] {
+                    let font_size = px(font_size as f32);
+                    let mut label = provider_field_label(label, font_size, &colors);
+                    let style = label.style();
+                    assert_eq!(style.text.font_size, Some(font_size.into()));
+                    assert_eq!(style.text.line_height, Some(relative(1.5)));
+                    assert_eq!(
+                        style.text.color,
+                        Some(rgba(colors.foreground_subtle).into())
+                    );
+                    assert!(style.size.width.is_none());
+                    assert!(style.size.height.is_none());
+                    assert!(style.text.white_space.is_none());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn settings_frame_scopes_reference_font_and_line_height_to_its_own_surface() {
+        for colors in [ThemeColors::light(), ThemeColors::dark()] {
+            for font_size in 12..=20 {
+                let font_size = font_size as f32;
                 let mut frame = settings_frame(px(font_size), &colors);
                 let style = frame.style();
                 assert_eq!(style.text.font_size, Some(px(font_size).into()));
+                assert_eq!(style.text.line_height, Some(relative(1.5)));
                 assert_eq!(style.background, Some(rgb(colors.sidebar_bg).into()));
                 assert_eq!(style.size.width, Some(relative(1.).into()));
                 assert_eq!(style.size.height, Some(relative(1.).into()));
@@ -1819,7 +2094,7 @@ mod tests {
                         );
                         assert_eq!(
                             style.text.line_height,
-                            Some(relative(if compact { 4. / 3. } else { 1.2 }).into())
+                            Some(relative(if compact { 4. / 3. } else { 1.2 }))
                         );
                         assert_eq!(style.text.font_weight, Some(FontWeight::SEMIBOLD));
                         assert_eq!(style.size.width, Some(relative(1.).into()));
@@ -1846,7 +2121,7 @@ mod tests {
                     let mut label = settings_group_label(label, px(font_size), &colors);
                     let style = label.style();
                     assert_eq!(style.text.font_size, Some(px(font_size - 2.).into()));
-                    assert_eq!(style.text.line_height, Some(relative(1.5).into()));
+                    assert_eq!(style.text.line_height, Some(relative(1.5)));
                     assert_eq!(
                         style.text.color,
                         Some(rgb(colors.remote_foreground_muted).into())
@@ -1854,7 +2129,7 @@ mod tests {
                     assert_eq!(style.text.font_weight, Some(FontWeight::MEDIUM));
                     assert_eq!(style.padding.left, Some(px(10.).into()));
                     assert_eq!(style.padding.right, Some(px(10.).into()));
-                    assert_eq!(style.padding.bottom, Some(rems(0.25).into()));
+                    assert_eq!(style.padding.bottom, Some(px(4.).into()));
                     assert!(style.size.height.is_none());
                 }
             }
@@ -1990,6 +2265,7 @@ mod tests {
                     Section::General,
                     Section::Appearance,
                     Section::Providers,
+                    Section::AgentConfig,
                     Section::Shortcuts,
                 ][..]
             )
