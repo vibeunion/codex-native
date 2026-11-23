@@ -52,22 +52,33 @@ pub struct ReviewSnapshot {
 }
 
 pub fn workspace_relative_path(workspace: &Path, file: &str) -> Option<String> {
-    use std::path::Component;
-    let path = Path::new(file);
-    let path = if path.is_absolute() {
-        path.strip_prefix(workspace).ok()?
+    // Git may emit either separator on Windows, while rooted paths without a
+    // drive letter are not considered absolute by `std::path::Path` there.
+    // Normalize lexically before validating containment so the same contract
+    // applies on every platform.
+    let normalize = |value: &str| value.replace('\\', "/");
+    let workspace = normalize(&workspace.to_string_lossy());
+    let workspace = workspace.trim_end_matches('/');
+    let file = normalize(file);
+    let file = if file.starts_with('/') {
+        if workspace.is_empty() {
+            file.strip_prefix('/').unwrap_or(&file)
+        } else if file == workspace {
+            ""
+        } else {
+            file.strip_prefix(&format!("{workspace}/"))?
+        }
     } else {
-        path
+        file.as_str()
     };
     let mut parts = Vec::new();
-    for component in path.components() {
+    for component in file.split('/') {
         match component {
-            Component::Normal(part) => parts.push(part.to_str()?),
-            Component::CurDir => {}
-            Component::ParentDir => {
+            "" | "." => {}
+            ".." => {
                 parts.pop()?;
             }
-            _ => return None,
+            part => parts.push(part),
         }
     }
     (!parts.is_empty()).then(|| parts.join("/"))
