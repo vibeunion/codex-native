@@ -134,7 +134,7 @@ Codex Native 提供了现代跨平台桌面工具标准的**免提权用户级�
 .\scripts\install.ps1
 
 # 远程一键部署
-irm https://raw.githubusercontent.com/zuohuadong/codex-native/main/scripts/install.ps1 | iex
+irm https://raw.githubusercontent.com/vibeunion/codex-native/main/scripts/install.ps1 | iex
 ```
 
 ### 3. 图形界面内一键修复与集成
@@ -163,7 +163,7 @@ published release; local builds remain usable via `-LocalExePath`.
 
 每个正式版本都会在 GitHub Release 中同时发布 CTFile 国内下载表：
 
-- [最新 Release（含 CTFile 下载地址）](https://github.com/zuohuadong/codex-native/releases/latest)
+- [最新 Release（含 CTFile 下载地址）](https://github.com/vibeunion/codex-native/releases/latest)
 - Release 资产中的 `ctfile-links.md` 保存每个二进制文件的 canonical CTFile 地址、大小和 SHA-256。
 - CTFile 公共目录由仓库变量 `CTFILE_PUBLIC_ROOT_URL` 配置，形如
   `https://url88.ctfile.com/dir/d123456`；未设置时，流水线会根据

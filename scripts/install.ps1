@@ -6,7 +6,7 @@
     configures user PATH, and registers the uninstaller into Windows Add/Remove Programs.
     No Administrator (UAC) permissions required!
 .EXAMPLE
-    irm https://raw.githubusercontent.com/zuohuadong/codex-native/main/scripts/install.ps1 | iex
+    irm https://raw.githubusercontent.com/vibeunion/codex-native/main/scripts/install.ps1 | iex
 #>
 
 [CmdletBinding()]
@@ -56,11 +56,11 @@ if (-not [string]::IsNullOrWhiteSpace($LocalExePath)) {
     Write-Host ">> 正在从远程发布源获取最新 Windows x64 二进制文件..." -ForegroundColor Yellow
     $Tag = $Version
     if ($Version -eq "latest") {
-        $Release = Invoke-RestMethod -Uri "https://api.github.com/repos/zuohuadong/codex-native/releases/latest"
+        $Release = Invoke-RestMethod -Uri "https://api.github.com/repos/vibeunion/codex-native/releases/latest"
         $Tag = $Release.tag_name
     } elseif (-not $Tag.StartsWith('v')) { $Tag = "v$Tag" }
     if ($Tag -notmatch '^v[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$') { throw "Invalid release tag: $Tag" }
-    $ReleaseBaseUrl = "https://github.com/zuohuadong/codex-native/releases/download/$Tag"
+    $ReleaseBaseUrl = "https://github.com/vibeunion/codex-native/releases/download/$Tag"
     $DownloadUrl = "$ReleaseBaseUrl/volt-windows-x64.exe"
     $ChecksumUrl = "$ReleaseBaseUrl/volt-windows-x64.exe.sha256"
     $TempExe = Join-Path $env:TEMP "volt-setup-$([guid]::NewGuid().ToString('N')).exe"
