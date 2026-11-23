@@ -4,6 +4,18 @@ A blazing-fast, lightweight native desktop AI coding assistant with a configurab
 
 ---
 
+## Interface Preview
+
+Captured from the native GPUI desktop build at a 1200 × 800 logical window size.
+
+### 中文界面
+
+![Codex Native Chinese interface](docs/screenshots/codex-native-zh.png)
+
+### English Interface
+
+![Codex Native English interface](docs/screenshots/codex-native-en.png)
+
 ## ⚡ Tech Stack Architecture
 
 * **Desktop UI & Rendering**: Native GPU rendering engine (120 FPS hardware acceleration).
